@@ -1,0 +1,113 @@
+name: API Security Scan
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    name: Сканирование безопасности API
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      - name: Build Scanner
+        run: mvn clean package -DskipTests
+
+      - name: Run API Security Scan
+        run: |
+          java -jar target/api-security-scanner-1.0.0.jar \
+            examples/petstore-api.yaml \
+            --output ./reports \
+            --gost \
+            --ci \
+            --fail-on-high
+        continue-on-error: true
+
+      - name: Upload Reports
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: security-reports
+          path: reports/
+
+      - name: Comment PR with Results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const reportPath = 'reports/scan-report.json';
+            
+            if (fs.existsSync(reportPath)) {
+              const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+              const stats = report.statistics;
+            
+              const comment = `## API Security Scan Results
+            
+              **API:** ${report.apiName} v${report.apiVersion}
+              **Scan Date:** ${report.scanTimestamp}
+            
+              ### Vulnerabilities Found:
+              - CRITICAL: ${stats.criticalVulnerabilities}
+              - HIGH: ${stats.highVulnerabilities}
+              - MEDIUM: ${stats.mediumVulnerabilities}
+              - LOW: ${stats.lowVulnerabilities}
+              - INFO: ${stats.infoVulnerabilities}
+            
+              **Total:** ${stats.totalVulnerabilities} vulnerabilities
+              **Contract Violations:** ${stats.contractViolations}
+            
+              [Download detailed reports](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
+              `;
+            
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: comment
+              });
+            }
+
+  # Дополнительная job для ГОСТ-шлюза (если доступен)
+  gost-check:
+    runs-on: ubuntu-latest
+    name: ГОСТ проверка
+    if: false  # Включить когда ГОСТ-шлюз будет доступен
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: ГОСТ Compliance Check
+        run: |
+          java -jar target/api-security-scanner-1.0.0.jar \
+            examples/petstore-api.yaml \
+            --gost \
+            --gost-gateway ${{ secrets.GOST_GATEWAY_URL }} \
+            --preset bank-api \
+            --output ./gost-reports
+
+      - name: Upload ГОСТ Reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: gost-reports
+          path: gost-reports/

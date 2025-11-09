@@ -1,0 +1,240 @@
+# VTB API Security Scanner - Конфигурация
+
+# Паттерны для обнаружения уязвимостей
+patterns:
+  # BOLA - ID параметры (camelCase для Java!)
+  idParameters:
+    - id
+    - ID
+    - Id
+    - identifier
+    - uuid
+    - userId
+    - user_id
+    - objectId
+    - object_id
+    - customerId
+    - customer_id
+    - accountId
+    - orderId
+    - transactionId
+  
+  # SQL Injection
+  sqlParameters:
+    - query
+    - sql
+    - search
+    - filter
+    - where
+    - table
+    - column
+    - database
+    - db
+  
+  # Command Injection
+  cmdParameters:
+    - command
+    - cmd
+    - exec
+    - execute
+    - run
+    - shell
+    - script
+  
+  # NoSQL Injection
+  nosqlParameters:
+    - mongo
+    - collection
+    - document
+    - find
+    - match
+  
+  # SSRF
+  ssrfParameters:
+    - url
+    - uri
+    - link
+    - href
+    - redirect
+    - callback
+    - webhook
+    - proxy
+    - fetch
+    - download
+    - import
+    - source
+    - src
+
+# Чувствительные пути (требуют особой защиты)
+sensitivePaths:
+  admin:
+    - /admin
+    - /administrator
+    - /management
+    - /console
+    - /panel
+    - /dashboard
+  
+  userData:
+    - /user
+    - /users
+    - /account
+    - /profile
+  
+  modifications:
+    - /delete
+    - /update
+    - /edit
+    - /create
+  
+  financial:
+    - /payment
+    - /pay
+    - /purchase
+    - /order
+    - /transaction
+    - /checkout
+
+# Персональные данные (ФЗ-152)
+personalDataFields:
+  - name
+  - surname
+  - lastname
+  - firstname
+  - middlename
+  - email
+  - phone
+  - passport
+  - inn
+  - snils
+  - address
+  - birthdate
+  - birthday
+  - birthplace
+
+# ГОСТ алгоритмы
+gostAlgorithms:
+  signatures:
+    - gost
+    - гост
+    - gostr3410
+    - gostr34102012
+    - "34.10-2012"
+  
+  hashes:
+    - gostr3411
+    - gostr34112012
+    - streebog
+    - стрибог
+    - "34.11-2012"
+  
+  ciphers:
+    - gost28147
+    - магma
+    - magma
+    - кузнечик
+    - kuznyechik
+
+# Международные алгоритмы (для сравнения)
+internationalAlgorithms:
+  - rsa
+  - ecdsa
+  - sha256
+  - sha-256
+  - sha512
+  - aes
+  - des
+
+# Настройки серьезности (severity)
+severityRules:
+  # BOLA
+  bolaWithoutAuth: CRITICAL
+  bolaWithAuthNoCheck: HIGH
+  
+  # Authentication
+  noSecuritySchemes: CRITICAL
+  weakBasicAuth: MEDIUM
+  apiKeyInQuery: HIGH
+  
+  # Injection
+  sqlInjectionNoValidation: HIGH
+  commandInjection: CRITICAL
+  
+  # ГОСТ
+  noGostMention: HIGH
+  internationalOnly: MEDIUM
+  noAlgorithmDetails: LOW
+
+# Бизнес-операции (API6:2023)
+sensitiveOperations:
+  financial:
+    - payment
+    - pay
+    - purchase
+    - buy
+    - checkout
+    - order
+    - transfer
+    - withdraw
+    - deposit
+  
+  authentication:
+    - register
+    - signup
+    - login
+    - reset
+    - password
+  
+  social:
+    - vote
+    - rating
+    - review
+    - comment
+    - like
+  
+  booking:
+    - booking
+    - reservation
+    - ticket
+
+# Защита от автоматизации
+protectionKeywords:
+  - captcha
+  - recaptcha
+  - rate limit
+  - throttle
+  - verification
+  - otp
+  - 2fa
+  - mfa
+  - token
+
+# Чувствительные поля (не должны возвращаться в API)
+sensitiveResponseFields:
+  - password
+  - token
+  - secret
+  - apikey
+  - api_key
+  - private_key
+  - access_token
+  - refresh_token
+  - credit_card
+  - creditcard
+  - ssn
+  - hash
+  - salt
+  - session
+  - jwt
+  - bearer
+
+# Read-only поля (не должны приниматься в input)
+readonlyFields:
+  - id
+  - created_at
+  - updated_at
+  - created_by
+  - modified_by
+  - version
+  - status
+
