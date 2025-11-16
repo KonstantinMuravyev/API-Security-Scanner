@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>VTB Hackathon33 · Архитектура & Flow</title>
+    <style>
+        :root {
+            --vtb-dark: #001a5a;
+            --vtb-blue: #0057d8;
+            --vtb-cyan: #00a3ff;
+            --text: #06122c;
+            --muted: #4c5775;
+            /* unified VTB palette */
+            --brand-gradient: linear-gradient(120deg,var(--vtb-dark),#003ba4 60%,var(--vtb-blue));
+            --surface-dark: #0f1f4b;
+            --surface-card: #0f1f4b; /* единый тёмный фон карточек */
+            /* unified shapes/shadows */
+            --radius-lg: 32px;
+            --radius-md: 22px;
+            --radius-sm: 18px;
+            --shadow-strong: 0 32px 90px rgba(0,26,90,0.45);
+            --shadow-card: 0 26px 70px rgba(0,26,90,0.18);
+            --shadow-inner: inset 0 0 0 1px rgba(255,255,255,0.1);
+            --border-strong: 1px solid rgba(0,87,216,0.28);
+            --border-soft: 1px solid rgba(0,87,216,0.18);
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            padding: 50px 0 70px;
+            font-family: "Segoe UI","Inter",system-ui,sans-serif;
+            background: linear-gradient(135deg,#dce5ff 0%,#fefeff 55%,#e6efff 100%);
+            color: var(--text);
+        }
+        /* base typographic rhythm */
+        h1,h2,h3,p,ul { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+        ul { margin: 0 0 0 18px; }
+        li { margin: 4px 0; }
+        li::marker { color: var(--vtb-blue); }
+        code, .code-block { -webkit-font-smoothing: initial; }
+        .hero {
+            width: 1180px;
+            margin: 0 auto 28px;
+            padding: 34px 48px;
+            border-radius: var(--radius-lg);
+            background: var(--brand-gradient);
+            color: #f0f4ff;
+            box-shadow: var(--shadow-strong);
+        }
+        .hero h1 { margin: 0; font-size: 42px; }
+        .hero p { margin: 10px 0 0; color: #d3dcff; }
+        .hero ul { margin: 16px 0 0; padding-left: 20px; color: #e5ecff; }
+
+        .slide {
+            width: 1180px;
+            margin: 0 auto 42px;
+            background: transparent; /* единая страница без перегородок */
+            border-radius: 0;
+            padding: 32px 0 0;
+            box-shadow: none;
+            border: none;
+        }
+        .slide.dark {
+            background: transparent; /* убираем темную плашку: единый фон */
+            color: var(--text);
+            border: 0;
+        }
+        h2 { margin: 0 0 6px; font-size: 30px; color: var(--vtb-blue); }
+        .slide.dark h2 { color: var(--vtb-blue); }
+        p.section-note { margin: 0 12px 18px 0; color: var(--muted); }
+
+        .code-block {
+            margin-top: 18px;
+            padding: 18px 24px;
+            border-radius: var(--radius-sm);
+            background: var(--surface-dark);
+            color: #d7e3ff;
+            font-family: "JetBrains Mono","Courier New",monospace;
+            font-size: 14px;
+            box-shadow: var(--shadow-inner);
+            border: var(--border-soft);
+        }
+        .code-block span {
+            color: #6ad1ff;
+        }
+        .flow-chart {
+            margin-top: 26px;
+            padding: 28px 24px;
+            border-radius: var(--radius-md);
+            background: rgba(255,255,255,0.15);
+            border: var(--border-soft);
+            box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08);
+        }
+        .flow-steps {
+            display: grid;
+            grid-template-columns: repeat(auto-fit,minmax(210px,1fr));
+            gap: 16px;
+        }
+        .flow-step {
+            background: var(--brand-gradient);
+            border: 1px solid rgba(255,255,255,0.22);
+            border-radius: var(--radius-sm);
+            padding: 16px 18px;
+            position: relative;
+            min-height: 140px;
+            box-shadow: 0 10px 24px rgba(0,26,90,0.24);
+        }
+        .flow-step::before {
+            content: attr(data-step);
+            position: absolute;
+            top: -14px;
+            left: 18px;
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: var(--vtb-cyan);
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            box-shadow: 0 6px 16px rgba(0,26,90,0.18);
+        }
+        .flow-step h4 { margin: 8px 0 6px; color: #eaf1ff; }
+        .flow-step p {
+            margin: 0;
+            font-size: 13px;
+            line-height: 1.4;
+            color: #d7e3ff;
+        }
+        .adv-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit,minmax(320px,1fr));
+            gap: 20px;
+        }
+        .adv {
+            border-radius: var(--radius-md);
+            padding: 26px;
+            background: var(--brand-gradient);
+            border: 1px solid rgba(255,255,255,0.22);
+            box-shadow: 0 10px 24px rgba(0,26,90,0.24);
+        }
+        .adv h3 { margin: 0 0 12px; color: #eaf1ff; }
+        .adv ul { margin: 0; padding-left: 18px; color: #d7e3ff; font-size: 14px; }
+        .kpis { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 8px; }
+        .kpi {
+            background: rgba(0,87,216,0.1);
+            color: #003a9f;
+            border: 1px solid rgba(0,87,216,0.25);
+            padding: 6px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+<div class="hero">
+    <h1>VTB Hackathon · архитектура, флоу и уникальность</h1>
+    <p>Финальная архитектура решения для питча полуфинала.</p>
+    <ul>
+        <li>ГОСТ/ФЗ‑152/mTLS в ядре → подходит банкам и госам</li>
+        <li>11 статических сканеров + deep/compliance модули</li>
+        <li>Готовые отчёты и CI/CD интеграции</li>
+    </ul>
+</div>
+
+<div class="slide">
+    <h2> Суть решения</h2>
+    <div class="code-block">
+<pre><span>Автосканер уязвимостей API, который:</span>
+• Находит 95% OWASP Top 10 уязвимостей ДО продакшена
+• Работает с ГОСТ-шлюзом без сложных зависимостей  
+• Интегрируется в CI/CD и «ломает» сборку при рисках
+• Покрывает REST (OpenAPI) и события (AsyncAPI)
+
+<span>Технологический стек:</span>
+• Java 21 + Virtual Threads для масштабирования
+• Модульная архитектура (11 сканеров + deep-анализ)
+• ГОСТ-предикция без live-доступа к шлюзу
+• CI/CD нативные интеграции (GitHub Actions, GitLab CI)</pre>
+    </div>
+</div>
+
+<div class="slide">
+    <h2>Архитектура решения</h2>
+    <p class="section-note">Структура проекта: основные модули и их ответственность.</p>
+    <div class="code-block">
+<pre>├── <span>core/</span>          — парсинг OpenAPI/AsyncAPI, конфиг, оркестратор <strong>SecurityScanner</strong>
+├── <span>scanners/</span>      — 11 статических сканеров (BOLA, BFLA, Injection, Secrets, RateLimit…)
+├── <span>deep/</span>          — DeepSchemaAnalyzer, CorrelationEngine, TLS/ГОСТ анализ, SecretInventory
+├── <span>analysis/</span>      — SmartAnalyzer, EnhancedRules, AttackSurfaceMapper, SchemaConstraintAnalyzer
+├── <span>util/</span>          — AccessControlHeuristics, общие эвристики/утилиты
+├── <span>fuzzing/</span>       — SmartFuzzer (targeted probes, генерация контрактных проб)
+├── <span>integration/</span>   — GOSTGateway, TLSAnalyzer, CI/CD адаптеры, webhook/REST коннекторы
+├── <span>reports/</span>       — HTML/PDF/JSON отчёты, ExecutiveSummary, attack-surface диаграммы
+├── <span>web/</span>           — Spring REST + static UI (загрузка спецификаций/выгрузка отчётов)
+└── <span>models/</span>        — ScanContext, Vulnerability, ContractViolation, ScanResult, ScanStatistics
+
+Основные компоненты:
+• SecurityScanner — управляет процессом сканирования
+• ScanContext — хранит данные для анализа  
+• SmartAnalyzer — обрабатывает и фильтрует результаты
+• CorrelationEngine — находит связи между уязвимостями
+
+Пайплайн ядра:
+1) Парсинг OpenAPI/AsyncAPI → нормализация/валидация (core) → <strong>ScanContext</strong>.
+2) Параллельный запуск сканеров на virtual threads (scanners/*) с ограничением ресурсов.
+3) Обогащение находок глубокими анализами (deep/*, TLS/ГОСТ, SecretInventory, SmartFuzzer).
+4) Дедупликация, корреляция, вычисление risk score/priority.
+5) Экспорт результатов в HTML/PDF/JSON и интеграции (reports/*, integration/*).</pre>
+    </div>
+
+    <h2>Рабочий процесс</h2>
+    <div class="flow-chart">
+        <div class="flow-steps">
+            <div class="flow-step" data-step="0">
+                <h4>Настройка политики</h4>
+                <p><strong>Вход:</strong> профиль домена, лимиты, правила дедупликации, CI-гейт (fail/pass).<br>
+                <strong>Обработчик:</strong> <span>core/Config</span>.<br>
+                <strong>Выход:</strong> единая политика сканирования для всех этапов.</p>
+            </div>
+            <div class="flow-step" data-step="1">
+                <h4>Ввод спецификации</h4>
+                <p><strong>Вход:</strong> OpenAPI/AsyncAPI (файл/URL), опции политики и домена.<br>
+                <strong>Обработчик:</strong> <span>core/OpenAPIParser</span>, <span>core/AsyncAPIParser</span>.<br>
+                <strong>Выход:</strong> <span>ScanContext</span> с валидированной моделью и доменным профилем (BANKING/HEALTHCARE/GOV).</p>
+            </div>
+            <div class="flow-step" data-step="2">
+                <h4>Обогащение модели</h4>
+                <p><strong>Вход:</strong> <span>ScanContext</span>.<br>
+                <strong>Обработчик:</strong> анализ поверхности атак и схем данных.<br>
+                <strong>Выход:</strong> карта поверхности атаки (эндпоинты, роли, LIST→RESOURCE цепочки, чувствительные объекты).</p>
+            </div>
+            <div class="flow-step" data-step="3">
+                <h4>Валидация аутентификации</h4>
+                <p><strong>Вход:</strong> карта поверхности атаки.<br>
+                <strong>Обработчик:</strong> <span>analysis/AccessControlHeuristics</span>.<br>
+                <strong>Выход:</strong> гипотезы по BOLA/BFLA/consent-only для использования сканерами.</p>
+            </div>
+            <div class="flow-step" data-step="4">
+                <h4>Параллельный статический анализ</h4>
+                <p><strong>Вход:</strong> контекст + карта поверхности атаки.<br>
+                <strong>Обработчик:</strong> пакет <span>scanners/*</span> (BOLA/BFLA/Injection/…); запуск через virtual threads.<br>
+                <strong>Выход:</strong> атомарные <code>Vulnerability</code>/<code>ContractViolation</code> с ссылками на артефакты.</p>
+            </div>
+            <div class="flow-step" data-step="5">
+                <h4>Глубокие проверки</h4>
+                <p><strong>Вход:</strong> набор находок из шага 3.<br>
+                <strong>Обработчик:</strong> <span>deep/*</span> (TLS/mTLS, OAuth/JWT, ГОСТ), <span>fuzzing/SmartFuzzer</span>, <span>SecretInventory</span>, <span>CorrelationEngine</span>.<br>
+                <strong>Выход:</strong> обогащённые находки + цепочки атак (evidence, impact, remediation).</p>
+            </div>
+            <div class="flow-step" data-step="6">
+                <h4>Дедупликация &amp; корреляция</h4>
+                <p><strong>Вход:</strong> атомарные и глубокие находки.<br>
+                <strong>Обработчик:</strong> <span>SmartAnalyzer</span>, <span>CorrelationEngine</span>.<br>
+                <strong>Выход:</strong> единый список инцидентов без дублей, с цепочками причин.</p>
+            </div>
+            <div class="flow-step" data-step="7">
+                <h4>Дедупликация &amp; отчёты</h4>
+                <p><strong>Вход:</strong> обогащённые находки и цепочки.<br>
+                <strong>Обработчик:</strong> <span>SmartAnalyzer</span>, <span>ConfidenceCalculator</span>, <span>reports/*</span>, <span>integration/CICDIntegration</span>.<br>
+                <strong>Выход:</strong> <code>ScanResult</code>/<code>ScanStatistics</code>, HTML/PDF/JSON, <code>ExecutiveSummary</code>, диаграмма attack‑surface, публикация в CI/CD.</p>
+            </div>
+            <div class="flow-step" data-step="8">
+                <h4>CI/CD гейт и обратная связь</h4>
+                <p><strong>Вход:</strong> <code>ScanStatistics</code>, политики и пороги.<br>
+                <strong>Обработчик:</strong> <span>integration/CICDIntegration</span>.<br>
+                <strong>Выход:</strong> статус пайплайна (pass/fail), комментарии к MR/PR, артефакты отчётов.</p>
+            </div>
+        </div>
+    </div>
+</div>
+</div>
+
+<div class="slide">
+    <h2> Бизнес-ценность</h2>
+    <div class="flow-steps">
+        <div class="flow-step" data-step="10x">
+            <h4>Снижение cost of fix</h4>
+            <p>Обнаружение в разработке vs продакшене = 1:100 по стоимости исправления</p>
+        </div>
+        <div class="flow-step" data-step="5min">  
+            <h4>Ускорение compliance</h4>
+            <p>ГОСТ-готовность за 5 минут вместо 2-недельного ручного аудита</p>
+        </div>
+        <div class="flow-step" data-step="0risk">
+            <h4>Снижение рисков</h4>
+            <p>Автоблокировка релизов при критичных BOLA/инъекциях</p>
+        </div>
+    </div>
+</div>
+
+<div class="slide">
+    <h2> Почему именно наше решение?</h2>
+    <div class="adv-grid">
+        <div class="adv">
+            <h3> GOST-предикция</h3>
+            <ul>
+                <li>Анализ спецификаций для выявления GOST-проблем</li>
+                <li>Работает без установки дополнительного ПО</li>
+                <li>Проверка TLS/SSL конфигураций на соответствие</li>
+            </ul>
+        </div>
+        <div class="adv">
+            <h3> Virtual Threads</h3>  
+            <ul>
+                <li>Параллельное тестирование 100+ эндпоинтов</li>
+                <li>Сканирование за 2-5 минут вместо 30+</li>
+                <li>Контроль ресурсов и таймаутов</li>
+            </ul>
+        </div>
+        <div class="adv">
+            <h3> Domain-Aware Rules</h3>
+            <ul>
+                <li>Банкинг: PSD2, Open Banking, финансовые данные</li>
+                <li>Госуслуги: ФЗ-152, ГОСТ, персональные данные</li>
+                <li>Healthcare: HIPAA, медицинские records</li>
+            </ul>
+        </div>
+    </div>
+</div>
+
+<div class="slide dark">
+    <h2>3. Ключевые преимущества</h2>
+    <div class="adv-grid">
+        <div class="adv">
+            <h3>Контекст + ГОСТ + AsyncAPI</h3>
+            <ul>
+                <li>Автоконтекст (BANKING / HEALTHCARE / GOV) → набор правил и метрик под домен.</li>
+                <li>ГОСТ-комплаенс по умолчанию: TLSAnalyzer (TLS1.3+mTLS), GOSTDeepAnalyzer, GOSTGateway, SecretInventory.</li>
+                <li>Два мира: REST (OpenAPI) + событийные контракты (AsyncAPI) в одном пайплайне.</li>
+                <li>Политики и профили: fail‑thresholds для CRITICAL/HIGH, белые/чёрные списки эндпоинтов.</li>
+                <li>Локальная работа, on‑prem: без облачных зависимостей и внешних DAST‑сервисов.</li>
+            </ul>
+        </div>
+        <div class="adv">
+            <h3>Единый эвристический движок</h3>
+            <ul>
+                <li>SmartAnalyzer + EnhancedRules + SchemaConstraintAnalyzer — интеллектуальная фильтрация результатов</li>
+                <li>AttackSurfaceMapper + CorrelationEngine — анализ цепочек BOLA и consent-only</li>
+                <li>ConfidenceCalculator + BenchmarkComparator — расчет приоритетов и уверенности</li>
+                <li>Virtual threads в оркестрации: масштабируемый параллелизм без лишней памяти.</li>
+                <li>Умная дедупликация находок — чистые и понятные отчеты</li>
+            </ul>
+        </div>
+        <div class="adv">
+            <h3>Готовность к боевым интеграциям</h3>
+            <ul>
+                <li>CLI + CI/CD интеграции, HTML/PDF/JSON отчеты, диаграммы attack-surface</li>
+                <li>Virtual threads → быстрые прогоны в пайплайнах, контролируемые лимиты ресурсов.</li>
+                <li>SmartFuzzer + deep‑модули покрывают DAST‑кейсы без внешних сервисов.</li>
+                <li>Чистый Java 21, on‑prem friendly, без облачных зависимостей — важно для банков/госов.</li>
+                <li>Пороговые гейты: блокировка релиза при критичных BOLA/BFLA/Secret/TLS‑ошибках.</li>
+                <li>Артефакты: JSON для машинной интеграции + PDF/HTML для менеджеров в одном ранe.</li>
+            </ul>
+        </div>
+    </div>
+</div>
+</body>
+</html>
+
