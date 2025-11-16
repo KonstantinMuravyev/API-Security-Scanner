@@ -26,6 +26,9 @@
   - Attack Surface Mapper и визуализация.
 
 ---
+## Архитектура решения
+
+[Документация по архитектуре для жюри](https://konstantinmuravyev.github.io/API-Security-Scanner/)
 
 ## Архитектура
 
