@@ -122,8 +122,8 @@ public class AuthScanner implements VulnerabilityScanner {
                     .title("Использование Basic Authentication")
                     .description("Схема '" + schemeName + "' использует Basic Auth, который передает " +
                                 "credentials в base64 (легко декодируется)")
-                    .endpoint("N/A")
-                    .method("N/A")
+                    .endpoint("scheme:" + schemeName)
+                    .method("DEFINITION")
                     .recommendation("Используйте более безопасные схемы: OAuth2, JWT Bearer Token")
                     .owaspCategory("API2:2023 - Broken Authentication")
                     .evidence("Обнаружена Basic Auth схема: " + schemeName)
@@ -140,8 +140,8 @@ public class AuthScanner implements VulnerabilityScanner {
                     .severity(Severity.HIGH)
                     .title("API Key в query параметрах")
                     .description("Схема '" + schemeName + "' передает API ключ в URL query string")
-                    .endpoint("N/A")
-                    .method("N/A")
+                    .endpoint("scheme:" + schemeName)
+                    .method("DEFINITION")
                     .recommendation("Передавайте API ключ в заголовках, не в URL")
                     .owaspCategory("API2:2023 - Broken Authentication")
                     .evidence("API Key передается в query: " + scheme.getName())
@@ -261,7 +261,7 @@ public class AuthScanner implements VulnerabilityScanner {
             if (content != null && content.getSchema() != null) {
                 // КРИТИЧНО: Разрешаем $ref ссылки перед анализом
                 io.swagger.v3.oas.models.media.Schema schema = resolveSchemaRef(content.getSchema(), openAPI);
-                java.util.List<String> dangerousClaims = new java.util.ArrayList<>(EnhancedRules.findDangerousJWTClaims(schema));
+                List<String> dangerousClaims = new ArrayList<>(EnhancedRules.findDangerousJWTClaims(schema));
                 dangerousClaims.removeIf(claim -> isAllowedJwtClaim(claim, path, operation));
                 
                 if (!dangerousClaims.isEmpty()) {

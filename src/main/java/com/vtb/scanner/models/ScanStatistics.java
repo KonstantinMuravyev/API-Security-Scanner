@@ -22,5 +22,11 @@ public class ScanStatistics {
     
     @Builder.Default
     private boolean gostCheckEnabled = false;
+    
+    private int maxRiskScore;
+    private double averageRiskScore;
+    
+    @Builder.Default
+    private java.util.Map<String, Long> impactSummary = new java.util.HashMap<>();
 }
 

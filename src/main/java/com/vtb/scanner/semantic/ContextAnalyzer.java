@@ -21,6 +21,8 @@ public class ContextAnalyzer {
         ECOMMERCE("Электронная коммерция"),
         SOCIAL("Социальные сети"),
         IOT("IoT"),
+        TELECOM("Телеком"),
+        AUTOMOTIVE("Connected Car / Автотелеематика"),
         GENERAL("Общий");
         
         private final String description;
@@ -88,6 +90,20 @@ public class ContextAnalyzer {
         }
         
         // IoT
+        if (combined.contains("telecom") || combined.contains("оператор") ||
+            combined.contains("msisdn") || combined.contains("subscriber") ||
+            combined.contains("sim") || combined.contains("sbermobile") ||
+            combined.contains("mobile") || combined.contains("roaming")) {
+            return APIContext.TELECOM;
+        }
+
+        if (combined.contains("vehicle") || combined.contains("авто") ||
+            combined.contains("lada") || combined.contains("vin") ||
+            combined.contains("telematics") || combined.contains("ota") ||
+            combined.contains("ecu") || combined.contains("connected car")) {
+            return APIContext.AUTOMOTIVE;
+        }
+
         if (combined.contains("iot") || combined.contains("device") ||
             combined.contains("sensor") || combined.contains("устройств")) {
             return APIContext.IOT;
@@ -122,7 +138,9 @@ public class ContextAnalyzer {
             // Для критичных контекстов повышаем severity
             if (context == APIContext.BANKING || 
                 context == APIContext.HEALTHCARE || 
-                context == APIContext.GOVERNMENT) {
+                context == APIContext.GOVERNMENT ||
+                context == APIContext.TELECOM ||
+                context == APIContext.AUTOMOTIVE) {
                 
                 // ГОСТ и ФЗ-152 для банков/медицины/госуслуг - критичнее
                 if (vulnerabilityType != null && 

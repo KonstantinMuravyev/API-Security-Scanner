@@ -7,8 +7,11 @@ import com.vtb.scanner.integration.CICDIntegration;
 import com.vtb.scanner.integration.GOSTGateway;
 import com.vtb.scanner.models.ScanResult;
 import com.vtb.scanner.models.Vulnerability;
+import com.vtb.scanner.semantic.ContextAnalyzer;
+import com.vtb.scanner.reports.ExecutiveSummaryExporter;
 import com.vtb.scanner.reports.HtmlReportGenerator;
 import com.vtb.scanner.reports.JsonReportGenerator;
+import com.vtb.scanner.reports.ReportInsights;
 import lombok.extern.slf4j.Slf4j;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
@@ -71,7 +74,7 @@ public class MainCommand implements Callable<Integer> {
     
     @Option(
         names = {"--gost-gateway"},
-        description = "URL ГОСТ-шлюза для проверки (если не указан - mock режим)"
+        description = "URL ГОСТ-шлюза для проверки (если не указан — выполняются только локальные проверки)"
     )
     private String gostGatewayUrl;
     
@@ -264,16 +267,31 @@ public class MainCommand implements Callable<Integer> {
                 com.vtb.scanner.fuzzing.SmartFuzzer fuzzer = 
                     new com.vtb.scanner.fuzzing.SmartFuzzer(targetUrl);
                 // КРИТИЧНО: Передаем найденные уязвимости для целевой проверки!
-                List<com.vtb.scanner.models.Vulnerability> fuzzingVulns = 
-                    fuzzer.targetedProbing(result.getVulnerabilities(), parser.getOpenAPI(), parser);
+                ContextAnalyzer.APIContext apiContext = ContextAnalyzer.APIContext.GENERAL;
+                try {
+                    if (result.getApiContext() != null) {
+                        apiContext = ContextAnalyzer.APIContext.valueOf(result.getApiContext());
+                    }
+                } catch (IllegalArgumentException ignored) {
+                    // Оставляем GENERAL
+                }
+                
+                List<Vulnerability> fuzzingVulns =
+                    fuzzer.targetedProbing(
+                        result.getVulnerabilities(),
+                        parser.getOpenAPI(),
+                        parser,
+                        apiContext,
+                        result.getAttackSurface(),
+                        result.getThreatGraph());
                 
                 if (!fuzzingVulns.isEmpty()) {
                     // КРИТИЧНО: Дедуплицируем подтвержденные уязвимости перед добавлением
                     // чтобы избежать дубликатов с уже существующими уязвимостями
                     // КРИТИЧНО: Синхронизируем доступ к списку уязвимостей для thread-safety
                     synchronized (result.getVulnerabilities()) {
-                        java.util.Map<String, com.vtb.scanner.models.Vulnerability> existingKeys = new java.util.HashMap<>();
-                        for (com.vtb.scanner.models.Vulnerability existing : result.getVulnerabilities()) {
+                        java.util.Map<String, Vulnerability> existingKeys = new java.util.HashMap<>();
+                        for (Vulnerability existing : result.getVulnerabilities()) {
                             if (existing != null && existing.getEndpoint() != null && existing.getMethod() != null && existing.getType() != null) {
                                 String key = String.format("%s|%s|%s", 
                                     existing.getEndpoint(), existing.getMethod(), existing.getType().name());
@@ -283,14 +301,14 @@ public class MainCommand implements Callable<Integer> {
                         
                         // Добавляем только уникальные подтвержденные уязвимости
                         int added = 0;
-                        for (com.vtb.scanner.models.Vulnerability fuzzingVuln : fuzzingVulns) {
+                        for (Vulnerability fuzzingVuln : fuzzingVulns) {
                             if (fuzzingVuln != null && fuzzingVuln.getEndpoint() != null && 
                                 fuzzingVuln.getMethod() != null && fuzzingVuln.getType() != null) {
                                 String key = String.format("%s|%s|%s", 
                                     fuzzingVuln.getEndpoint(), fuzzingVuln.getMethod(), fuzzingVuln.getType().name());
                                 
                                 // Если уязвимость уже существует, заменяем ее на подтвержденную (с более высоким confidence)
-                                com.vtb.scanner.models.Vulnerability existing = existingKeys.get(key);
+                                Vulnerability existing = existingKeys.get(key);
                                 if (existing != null) {
                                     // Заменяем существующую на подтвержденную (у нее выше confidence)
                                     if (fuzzingVuln.getConfidence() > existing.getConfidence()) {
@@ -317,7 +335,7 @@ public class MainCommand implements Callable<Integer> {
             }
             
             // 6. Генерация отчетов
-            log.info("📊 Генерация отчетов...");
+            log.info("Генерация отчетов...");
             Path outputPath = Paths.get(outputDir);
             outputPath.toFile().mkdirs();
             
@@ -325,6 +343,10 @@ public class MainCommand implements Callable<Integer> {
                 JsonReportGenerator jsonGen = new JsonReportGenerator();
                 jsonGen.generate(result, outputPath.resolve("scan-report.json"));
             }
+
+            log.info("Формирование executive summary...");
+            ExecutiveSummaryExporter summaryExporter = new ExecutiveSummaryExporter();
+            summaryExporter.writeSummary(outputPath.resolve("executive-summary.json"), result);
             
             if (!jsonOnly) {
                 HtmlReportGenerator htmlGen = new HtmlReportGenerator();
@@ -337,7 +359,7 @@ public class MainCommand implements Callable<Integer> {
                 pdfGen.generate(result, outputPath.resolve("scan-report.pdf"));
                 
                 // ИННОВАЦИЯ: Attack Surface Map
-                log.info("🗺️ Построение карты поверхности атаки...");
+                log.info("Построение карты поверхности атаки...");
                 com.vtb.scanner.analysis.AttackSurfaceMapper.AttackSurface surface = 
                     com.vtb.scanner.analysis.AttackSurfaceMapper.map(parser.getOpenAPI());
                 
@@ -381,7 +403,7 @@ public class MainCommand implements Callable<Integer> {
     private void applyPreset() {
         if (preset == null) return;
         
-        log.info("🎨 Применение preset: {}", preset);
+        log.info("Применение preset: {}", preset);
         
         switch (preset.toLowerCase()) {
             case "bank-api":
@@ -417,10 +439,22 @@ public class MainCommand implements Callable<Integer> {
         System.out.println();
         System.out.println("API: " + result.getApiName() + " v" + result.getApiVersion());
         System.out.println("URL: " + result.getTargetUrl());
-        System.out.println("📅 Дата: " + result.getScanTimestamp());
-        System.out.println("⏱️  Время сканирования: " + result.getStatistics().getScanDurationMs() + " мс");
+        System.out.println("Дата: " + result.getScanTimestamp());
+        System.out.println("Время сканирования: " + result.getStatistics().getScanDurationMs() + " мс");
         System.out.println();
-        System.out.println("📊 СТАТИСТИКА:");
+
+        if (result.getExecutiveSummary() != null) {
+            var summary = result.getExecutiveSummary();
+            System.out.println("Итоговый риск: " + summary.getRiskLevel() + " (" + summary.getRiskScore() + "/100)");
+            System.out.println("Контекст API: " + summary.getApiContext());
+            if (summary.getRecommendedActions() != null && !summary.getRecommendedActions().isEmpty()) {
+                System.out.println("Рекомендуемые действия:");
+                summary.getRecommendedActions().forEach(action -> System.out.println("   - " + action));
+            }
+            System.out.println();
+        }
+
+        System.out.println("СТАТИСТИКА:");
         System.out.println("   Всего эндпоинтов: " + result.getStatistics().getTotalEndpoints());
         System.out.println("   Всего уязвимостей: " + result.getVulnerabilities().size());
         System.out.println();
@@ -435,7 +469,28 @@ public class MainCommand implements Callable<Integer> {
         System.out.println("INFO:     " + result.getVulnerabilityCountBySeverity(
             com.vtb.scanner.models.Severity.INFO));
         System.out.println();
-        
+
+        String context = result.getExecutiveSummary() != null ? result.getExecutiveSummary().getApiContext() : null;
+        List<Vulnerability> topCritical = ReportInsights.getTopCriticalVulnerabilities(result.getVulnerabilities(), context);
+        if (!topCritical.isEmpty()) {
+            System.out.println("ТОП КРИТИЧНЫЕ УЯЗВИМОСТИ:");
+            int limit = Math.min(5, topCritical.size());
+            for (int i = 0; i < limit; i++) {
+                Vulnerability v = topCritical.get(i);
+                System.out.printf("   #%d [%s / P%d] %s%n",
+                    i + 1,
+                    v.getSeverity(),
+                    v.getPriority(),
+                    v.getTitle());
+                System.out.printf("      → %s [%s], risk=%d, confidence=%d%%%n",
+                    v.getEndpoint(),
+                    v.getMethod(),
+                    v.getRiskScore(),
+                    v.getConfidence());
+            }
+            System.out.println();
+        }
+
         if (enableGost) {
             long gostVulns = result.getVulnerabilities().stream()
                 .filter(v -> v.isGostRelated())
@@ -451,7 +506,7 @@ public class MainCommand implements Callable<Integer> {
                 .limit(5)
                 .forEach(v -> {
                     System.out.printf("   [%s] %s%n", 
-                        getSeverityEmoji(v.getSeverity()), 
+                        getSeverityLabel(v.getSeverity()), 
                         v.getTitle());
                     System.out.printf("      → %s [%s]%n", 
                         v.getEndpoint(), 
@@ -465,7 +520,7 @@ public class MainCommand implements Callable<Integer> {
         System.out.println();
     }
     
-    private String getSeverityEmoji(com.vtb.scanner.models.Severity severity) {
+    private String getSeverityLabel(com.vtb.scanner.models.Severity severity) {
         return switch (severity) {
             case CRITICAL -> "CRITICAL";
             case HIGH -> "HIGH";

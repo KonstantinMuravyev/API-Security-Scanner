@@ -104,6 +104,8 @@ class FullScanIntegrationTest {
         com.vtb.scanner.models.ScanResult result = scanner.scan();
         
         // ГОСТ нарушения ДОЛЖНЫ быть!
+        result.getVulnerabilities().forEach(v ->
+            System.out.println("VULN: " + v.getId() + " type=" + v.getType() + " gost=" + v.isGostRelated() + " severity=" + v.getSeverity()));
         long gostViolations = result.getVulnerabilities().stream()
             .filter(com.vtb.scanner.models.Vulnerability::isGostRelated)
             .count();

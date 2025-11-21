@@ -18,7 +18,33 @@ patterns:
     - accountId
     - orderId
     - transactionId
-  
+    - requestId
+    - request_id
+    - applicationId
+    - application_id
+    - agreementId
+    - agreement_id
+    - consentId
+    - consent_id
+    - contractId
+    - contract_id
+    - policyId
+    - policy_id
+    - ticketId
+    - ticket_id
+    - claimId
+    - claim_id
+    - caseId
+    - case_id
+    - subscriberId
+    - subscriber_id
+    - msisdn
+    - deviceId
+    - device_id
+    - vin
+    - vehicleId
+    - vehicle_id
+
   # SQL Injection
   sqlParameters:
     - query
@@ -30,7 +56,7 @@ patterns:
     - column
     - database
     - db
-  
+
   # Command Injection
   cmdParameters:
     - command
@@ -40,7 +66,7 @@ patterns:
     - run
     - shell
     - script
-  
+
   # NoSQL Injection
   nosqlParameters:
     - mongo
@@ -48,7 +74,7 @@ patterns:
     - document
     - find
     - match
-  
+
   # SSRF
   ssrfParameters:
     - url
@@ -64,6 +90,119 @@ patterns:
     - import
     - source
     - src
+    - endpoint
+    - service
+    - serviceUrl
+    - wsdl
+    - target
+    - feed
+    - address
+    - gateway
+    - telematics
+    - remoteUrl
+    - firmwareUrl
+    - otaUrl
+
+# Маркеры контроля доступа и consent (расширяют дефолтные списки AccessControlHeuristics)
+accessControl:
+  accessTextMarkers:
+    - Authorization Bearer
+    - Authorization header
+    - Mutual TLS
+    - signed JWT
+    - DPoP
+    - JWS signature
+    - OAuth client assertion
+    - consent token
+    - PSU token
+    - TPP certificate
+    - ESIA token
+    - x-Consent-ID
+    - device binding
+    - trusted device
+    - remote vehicle control
+    - SIM swap protection
+  headerNames:
+    - X-TPP-Authorization
+    - X-PSU-Authorization
+    - X-DPoP
+    - X-JWS-Signature
+    - X-Consent-Token
+    - X-Device-Binding
+    - X-Trusted-Device
+  queryNames:
+    - consent_token
+    - psu_token
+    - tpp_token
+    - x_device_binding
+    - trusted_device
+    - session_assertion
+  bodyPropertyNames:
+    - consent_token
+    - consent_scope
+    - consent_permissions
+    - psu_token
+    - tpp_token
+    - device_binding
+    - trusted_device
+    - remote_control_token
+  consentMarkers:
+    - consent token
+    - consent scope
+    - consent permissions
+    - x-consent-token
+    - x-consent-scope
+    - customer consent
+    - user consent
+    - signed consent
+  openBankingPathMarkers:
+    - /openbanking
+    - /psu
+    - /tpp
+    - /payments/consents
+    - /funds-confirmations
+    - /account-access
+  openBankingTextMarkers:
+    - account access consent
+    - payment consent
+    - funds confirmation
+    - open banking api
+    - psd2 payment
+    - tpp onboarding
+  strongAuthTextMarkers:
+    - mutual tls
+    - tls client certificate
+    - mtls
+    - signed jwt
+    - oauth2 m2m
+    - dpop
+    - jws signature
+    - psd2 eidas
+    - qualified signature
+  strongAuthHeaderNames:
+    - x-mutual-tls-cert
+    - x-client-cert
+    - x-psd2-cert
+    - x-eidas-cert
+    - x-fapi-dpop
+    - x-client-assertion
+
+riskWeights:
+  marketplaceFlow: 18
+  marketplaceFlowHighContext: 35
+  governmentFlow: 40
+  sessionFlow: 12
+  consentPresent: -8
+  consentMissing: 22
+  consentMissingHighContext: 48
+  loginAbuse: 16
+  contextMultipliers:
+    banking: 1.25
+    government: 1.3
+    healthcare: 1.2
+    telecom: 1.15
+    automotive: 1.2
+    marketplace: 1.1
 
 # Чувствительные пути (требуют особой защиты)
 sensitivePaths:
@@ -74,19 +213,19 @@ sensitivePaths:
     - /console
     - /panel
     - /dashboard
-  
+
   userData:
     - /user
     - /users
     - /account
     - /profile
-  
+
   modifications:
     - /delete
     - /update
     - /edit
     - /create
-  
+
   financial:
     - /payment
     - /pay
@@ -94,6 +233,63 @@ sensitivePaths:
     - /order
     - /transaction
     - /checkout
+    - /sbbol
+    - /sber
+    - /vtb
+    - /tinkoff
+    - /alfa
+    - /gazprombank
+    - /fastpayment
+    - /fps
+    - /mir
+    - /loan
+    - /credit
+    - /mortgage
+    - /insurance
+    - /subsidy
+    - /benefit
+    - /pension
+
+  government:
+    - /gosuslugi
+    - /esia
+    - /smev
+    - /vgis
+    - /rosreestr
+    - /nalog
+    - /pgu
+    - /frgu
+    - /mfc
+    - /passport
+    - /registry
+    - /court
+    - /benefit
+    - /social
+
+  telecom:
+    - /msisdn
+    - /subscriber
+    - /sim
+    - /simcard
+    - /tariff
+    - /balance
+    - /topup
+    - /package
+    - /roaming
+    - /sbermobile
+    - /operator
+
+  automotive:
+    - /telemetry
+    - /vehicle
+    - /vin
+    - /telematics
+    - /remote
+    - /engine
+    - /diagnostic
+    - /location
+    - /lada
+    - /lada-connect
 
 # Персональные данные (ФЗ-152)
 personalDataFields:
@@ -102,11 +298,31 @@ personalDataFields:
   - lastname
   - firstname
   - middlename
+  - patronymic
   - email
   - phone
   - passport
   - inn
   - snils
+  - ogrn
+  - ogrnip
+  - kpp
+  - polis
+  - driver_license
+  - parent_name
+  - birth_place
+  - gender
+  - citizenship
+  - tax_id
+  - bik
+  - bank_account
+  - card_number
+  - pan
+  - msisdn
+  - subscriber_id
+  - device_serial
+  - vin
+  - chassis_number
   - address
   - birthdate
   - birthday
@@ -120,17 +336,17 @@ gostAlgorithms:
     - gostr3410
     - gostr34102012
     - "34.10-2012"
-  
+
   hashes:
     - gostr3411
     - gostr34112012
     - streebog
     - стрибог
     - "34.11-2012"
-  
+
   ciphers:
     - gost28147
-    - магma
+    - магма
     - magma
     - кузнечик
     - kuznyechik
@@ -150,16 +366,16 @@ severityRules:
   # BOLA
   bolaWithoutAuth: CRITICAL
   bolaWithAuthNoCheck: HIGH
-  
+
   # Authentication
   noSecuritySchemes: CRITICAL
   weakBasicAuth: MEDIUM
   apiKeyInQuery: HIGH
-  
+
   # Injection
   sqlInjectionNoValidation: HIGH
   commandInjection: CRITICAL
-  
+
   # ГОСТ
   noGostMention: HIGH
   internationalOnly: MEDIUM
@@ -177,25 +393,122 @@ sensitiveOperations:
     - transfer
     - withdraw
     - deposit
-  
+    - sbbol
+    - sbp
+    - fps
+    - mir
+    - fastpayment
+    - sbpay
+    - sbol
+    - vtbonline
+    - gosuslugi-pay
+    - mcsecurecode
+    - loan
+    - credit
+    - mortgage
+    - refinancing
+    - overdraft
+    - insurance
+    - claim
+    - payout
+    - subsidy
+    - benefit
+    - pension
+
   authentication:
     - register
     - signup
     - login
     - reset
     - password
-  
+    - esia
+    - smev
+    - otp
+    - esid
+    - доверенная
+    - esm
+    - multifactor
+    - challenge
+    - подтверждение
+    - авторизация
+
   social:
     - vote
     - rating
     - review
     - comment
     - like
-  
+    - голосование
+    - отзыв
+    - оценка
+    - лайк
+
   booking:
     - booking
     - reservation
     - ticket
+    - бронь
+    - бронирование
+    - талон
+
+  government:
+    - gosuslugi
+    - esia
+    - smev
+    - registry
+    - permit
+    - license
+    - certificate
+    - social_support
+    - subsidy
+    - pension
+    - справка
+    - выписка
+    - удостоверение
+    - nalog
+    - frgu
+
+  insurance:
+    - policy
+    - polis
+    - claim
+    - indemnity
+    - страхование
+    - страховой случай
+    - каско
+    - осаго
+    - дсо
+    - медицинское страхование
+    - страховая выплата
+
+  telecom:
+    - msisdn
+    - subscriber
+    - sim
+    - simcard
+    - tariff
+    - topup
+    - balance
+    - roaming
+    - package
+    - оператор
+    - sbermobile
+    - мобильная связь
+
+  automotive:
+    - telemetry
+    - telematics
+    - vehicle
+    - vin
+    - diagnostics
+    - remote_start
+    - remote_stop
+    - locate
+    - immobilizer
+    - lada
+    - connectedcar
+    - автозапуск
+    - удаленный доступ
 
 # Защита от автоматизации
 protectionKeywords:
@@ -208,6 +521,36 @@ protectionKeywords:
   - 2fa
   - mfa
   - token
+  - sms
+  - push
+  - esia
+  - smev
+  - sbbol
+  - antifraud
+  - risk control
+  - device fingerprint
+  - trusted device
+  - esid
+  - esia-token
+  - quantum
+  - 3ds
+  - miraccept
+  - tpp-signature
+  - cryptopro
+  - kval
+  - единобиом
+  - ebs
+  - digital signature
+  - otp_sms
+  - otp_push
+  - voice biometric
+  - ussd
+  - call center PIN
+  - sim binding
+  - trusted sim
+  - device binding
+  - garage mode
+  - remote immobilizer
 
 # Чувствительные поля (не должны возвращаться в API)
 sensitiveResponseFields:
@@ -237,4 +580,82 @@ readonlyFields:
   - modified_by
   - version
   - status
+
+secretInventory:
+  shadowEnvironmentKeywords:
+    - dev
+    - development
+    - test
+    - qa
+    - uat
+    - stage
+    - staging
+    - preprod
+    - sandbox
+    - localhost
+    - 127.0.0.1
+    - 0.0.0.0
+  secretPatterns:
+    - "(?i)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"
+    - "(?i)AKIA[0-9A-Z]{16}"
+    - "(?i)(?:api|auth|access|client|secret)[-_]?(?:key|token|secret)\\s*[:=]\\s*[\\\"']?[A-Za-z0-9_/+=-]{12,}"
+    - "(?i)password\\s*[:=]\\s*[\\\"']?[A-Za-z0-9@#$%^&*()_+=-]{6,}"
+    - "(?i)bearer\\s+[A-Za-z0-9._-]{20,}"
+  secretIndicators:
+    - token
+    - secret
+    - password
+    - pwd
+    - bearer
+    - api_key
+    - client_secret
+    - authorization
+    - private_key
+    - access-key
+
+featureToggles:
+  enableMarketplaceHeuristics: true
+  enableGovernmentHeuristics: true
+  enableConsentChecks: true
+  enableSessionHardening: true
+  enableLoginRateLimitCheck: true
+  enableFraudHeuristics: true
+
+smartFuzzer:
+  globalLimit: 20
+  perEndpointLimit: 4
+  delayMs: 150
+  timeoutSec: 4
+  maxTimeoutsPerEndpoint: 2
+  maxTotalTimeouts: 5
+  maxNetworkErrors: 3
+  maxNetworkErrorsPerEndpoint: 2
+  stopStatusCodes:
+    - 401
+    - 403
+    - 429
+  contexts:
+    BANKING:
+      globalLimit: 12
+      perEndpointLimit: 3
+      delayMs: 200
+      timeoutSec: 5
+      maxTimeoutsPerEndpoint: 2
+      maxTotalTimeouts: 4
+      maxNetworkErrors: 2
+    TELECOM:
+      globalLimit: 15
+      perEndpointLimit: 3
+      delayMs: 180
+    AUTOMOTIVE:
+      perEndpointLimit: 2
+      delayMs: 220
+
+dynamicScanner:
+  enabled: true
+  maxScenarios: 5
+  maxStepsPerScenario: 2
+  delayMs: 150
+  timeoutSec: 4
+  maxRequestsPerSecond: 1
 

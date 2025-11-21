@@ -6,6 +6,8 @@ import com.vtb.scanner.deep.DeepSchemaAnalyzer;
 import com.vtb.scanner.models.Severity;
 import com.vtb.scanner.models.Vulnerability;
 import com.vtb.scanner.models.VulnerabilityType;
+import com.vtb.scanner.semantic.ContextAnalyzer;
+import com.vtb.scanner.util.AccessControlHeuristics;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.PathItem;
@@ -24,6 +26,7 @@ import java.util.*;
 @Slf4j
 public class PropertyAuthScanner implements VulnerabilityScanner {
     
+    @SuppressWarnings("unused")
     private final String targetUrl;
     private final ScannerConfig config;
     private final Set<String> sensitiveFields;
@@ -149,9 +152,10 @@ public class PropertyAuthScanner implements VulnerabilityScanner {
         if (jsonType != null && jsonType.getSchema() != null) {
             // 1. Deep analyzer (рекурсивно)
             // КРИТИЧНО: Передаем openAPI для разрешения $ref ссылок
-            List<DeepSchemaAnalyzer.SchemaIssue> issues = 
+            List<DeepSchemaAnalyzer.SchemaIssue> issues =
                 DeepSchemaAnalyzer.analyzeResponse(jsonType.getSchema(), path, method, openAPI);
-            
+
+            Set<String> reportedPaths = new HashSet<>();
             for (DeepSchemaAnalyzer.SchemaIssue issue : issues) {
                 vulnerabilities.add(Vulnerability.builder()
                     .id(com.vtb.scanner.models.VulnerabilityIdGenerator.generateId(
@@ -167,15 +171,19 @@ public class PropertyAuthScanner implements VulnerabilityScanner {
                     .owaspCategory("API3:2023 - Excessive Data (Deep)")
                     .evidence("Найдено на глубине: " + issue.getPath())
                     .build());
+                reportedPaths.add(issue.getPath());
             }
             
             // 2. ИСПОЛЬЗУЕМ EnhancedRules для чувствительных полей!
             // КРИТИЧНО: Разрешаем $ref ссылки перед анализом
-            Schema resolvedSchema = resolveSchemaRef(jsonType.getSchema(), openAPI);
+            Schema<?> resolvedSchema = resolveSchemaRef(jsonType.getSchema(), openAPI);
             List<String> sensitiveFields = com.vtb.scanner.heuristics.EnhancedRules.findSensitiveFieldsInResponse(
                 resolvedSchema);
             
             for (String field : sensitiveFields) {
+                if (reportedPaths.contains(field)) {
+                    continue;
+                }
                 Vulnerability tempVuln = Vulnerability.builder()
                     .type(VulnerabilityType.EXCESSIVE_DATA_EXPOSURE)
                     .severity(Severity.HIGH)
@@ -207,7 +215,7 @@ public class PropertyAuthScanner implements VulnerabilityScanner {
             
             // 3. ИСПОЛЬЗУЕМ EnhancedRules для персональных данных (ФЗ-152)!
             // КРИТИЧНО: Разрешаем $ref ссылки перед анализом
-            Schema resolvedSchemaForPersonal = resolveSchemaRef(jsonType.getSchema(), openAPI);
+            Schema<?> resolvedSchemaForPersonal = resolveSchemaRef(jsonType.getSchema(), openAPI);
             if (com.vtb.scanner.heuristics.EnhancedRules.hasPersonalData(resolvedSchemaForPersonal)) {
                 vulnerabilities.add(Vulnerability.builder()
                     .id(com.vtb.scanner.models.VulnerabilityIdGenerator.generateId(
@@ -261,8 +269,6 @@ public class PropertyAuthScanner implements VulnerabilityScanner {
         com.vtb.scanner.semantic.OperationClassifier.OperationType opType = 
             com.vtb.scanner.semantic.OperationClassifier.classify(path, method, operation);
         
-        boolean isReadOperation = (opType == com.vtb.scanner.semantic.OperationClassifier.OperationType.READ);
-        
         if (operation.getResponses() == null) {
             return vulnerabilities;
         }
@@ -276,7 +282,7 @@ public class PropertyAuthScanner implements VulnerabilityScanner {
             MediaType mediaType = content.get("application/json");
             if (mediaType == null || mediaType.getSchema() == null) continue;
             
-            Schema schema = mediaType.getSchema();
+            Schema<?> schema = mediaType.getSchema();
             // КРИТИЧНО: Разрешаем $ref ссылки для полного анализа
             schema = resolveSchemaRef(schema, openAPI);
             Set<String> foundSensitive = findSensitiveFields(schema);
@@ -288,6 +294,10 @@ public class PropertyAuthScanner implements VulnerabilityScanner {
                     case MEDIUM -> Severity.HIGH;
                     default -> Severity.MEDIUM;
                 };
+                if (opType == com.vtb.scanner.semantic.OperationClassifier.OperationType.READ &&
+                    severity.compareTo(Severity.HIGH) < 0) {
+                    severity = Severity.HIGH;
+                }
                 
                 vulnerabilities.add(Vulnerability.builder()
                     .id(com.vtb.scanner.models.VulnerabilityIdGenerator.generateId(
@@ -340,14 +350,21 @@ public class PropertyAuthScanner implements VulnerabilityScanner {
             return vulnerabilities;
         }
         
-        Schema schema = mediaType.getSchema();
+        Schema<?> schema = mediaType.getSchema();
         // КРИТИЧНО: Разрешаем $ref ссылки для полного анализа
         schema = resolveSchemaRef(schema, openAPI);
-        
+        Map<String, Schema<?>> schemaProperties = collectSchemaProperties(schema, new IdentityHashMap<>());
+
         // СЕМАНТИКА: определяем тип операции
         com.vtb.scanner.semantic.OperationClassifier.OperationType opType = 
             com.vtb.scanner.semantic.OperationClassifier.classify(path, method, operation);
-        
+
+        boolean hasStrongAuthorization = AccessControlHeuristics.hasStrongAuthorization(operation, openAPI);
+        boolean hasExplicitAccess = AccessControlHeuristics.hasExplicitAccessControl(operation, path, openAPI);
+        boolean hasConsentEvidence = AccessControlHeuristics.hasConsentEvidence(operation, openAPI);
+        boolean isOpenBankingOperation = AccessControlHeuristics.isOpenBankingOperation(path, operation, openAPI);
+        ContextAnalyzer.APIContext apiContext = ContextAnalyzer.detectContext(openAPI);
+
         // 1. Read-only поля (старая логика)
         Set<String> foundReadonly = findReadonlyFields(schema);
         foundReadonly = filterReadonlyFalsePositives(foundReadonly, path, operation);
@@ -388,27 +405,28 @@ public class PropertyAuthScanner implements VulnerabilityScanner {
         // 2. Опасные поля через EnhancedRules (role, admin, balance, permissions и т.д.)
         List<String> dangerousFields = com.vtb.scanner.heuristics.EnhancedRules
             .findMassAssignmentRiskFields(schema, operation, path);
+        dangerousFields = filterMassAssignmentBusinessContext(dangerousFields, schemaProperties,
+            hasStrongAuthorization, hasExplicitAccess, hasConsentEvidence, isOpenBankingOperation, apiContext);
+
         if (!dangerousFields.isEmpty()) {
-            Severity severity = baseSeverity;
-            if (severity.compareTo(Severity.HIGH) < 0) {
-                severity = Severity.HIGH;
-            }
-            if (opType == com.vtb.scanner.semantic.OperationClassifier.OperationType.REGISTER ||
-                opType == com.vtb.scanner.semantic.OperationClassifier.OperationType.CREATE) {
-                severity = (severity == Severity.CRITICAL || riskScore > 120) ? Severity.CRITICAL : Severity.HIGH;
-            } else if (opType == com.vtb.scanner.semantic.OperationClassifier.OperationType.UPDATE) {
-                severity = (severity == Severity.CRITICAL || riskScore > 110) ? Severity.CRITICAL : Severity.HIGH;
-            }
+            Severity severity = calculateMassAssignmentSeverity(baseSeverity, opType, riskScore, dangerousFields,
+                hasStrongAuthorization, hasExplicitAccess, hasConsentEvidence, isOpenBankingOperation, apiContext);
+            int adjustedRiskScore = adjustMassAssignmentRiskScore(riskScore, baseSeverity, severity,
+                hasStrongAuthorization, hasExplicitAccess, hasConsentEvidence, isOpenBankingOperation, apiContext);
 
             Vulnerability tempVuln = Vulnerability.builder()
                 .type(VulnerabilityType.BROKEN_OBJECT_PROPERTY)
                 .severity(severity)
-                .riskScore(riskScore)
+                .riskScore(adjustedRiskScore)
                 .build();
 
             int confidence = com.vtb.scanner.heuristics.ConfidenceCalculator.calculateConfidence(
                 tempVuln, operation, false, true);
             int priority = com.vtb.scanner.heuristics.ConfidenceCalculator.calculatePriority(tempVuln, confidence);
+
+            String impactLevel = determineMassAssignmentImpact(dangerousFields, severity);
+            String evidence = buildMassAssignmentEvidence(dangerousFields, hasStrongAuthorization,
+                hasExplicitAccess, hasConsentEvidence, isOpenBankingOperation, adjustedRiskScore, riskScore);
 
             vulnerabilities.add(Vulnerability.builder()
                 .id(com.vtb.scanner.models.VulnerabilityIdGenerator.generateId(
@@ -416,7 +434,7 @@ public class PropertyAuthScanner implements VulnerabilityScanner {
                     "Mass assignment risk"))
                 .type(VulnerabilityType.BROKEN_OBJECT_PROPERTY)
                 .severity(severity)
-                .riskScore(riskScore)
+                .riskScore(adjustedRiskScore)
                 .title("Поля требуют whitelist (Mass Assignment риск)")
                 .description(String.format(
                     "Request body содержит бизнес-критичные поля: %s. " +
@@ -434,12 +452,10 @@ public class PropertyAuthScanner implements VulnerabilityScanner {
                     "5. Логируйте изменения ролей/разрешений"
                 )
                 .owaspCategory("API6:2023 - Mass Assignment")
-                .evidence("Поля без явной защиты: " + String.join(", ", dangerousFields))
+                .evidence(evidence)
                 .confidence(confidence)
                 .priority(priority)
-                .impactLevel(severity == Severity.CRITICAL ?
-                    "PRIVILEGE_ESCALATION: Получение admin прав" :
-                    "AUTHORIZATION_BYPASS: Изменение чужих данных")
+                .impactLevel(impactLevel)
                 .build());
         }
         
@@ -449,60 +465,44 @@ public class PropertyAuthScanner implements VulnerabilityScanner {
     /**
      * Рекурсивный поиск чувствительных полей в схеме
      */
-    @SuppressWarnings("rawtypes")
-    private Set<String> findSensitiveFields(Schema schema) {
-        Set<String> found = new HashSet<>();
-        
-        if (schema.getProperties() != null) {
-            Map properties = schema.getProperties();
-            for (Object key : properties.keySet()) {
-                String fieldName = key.toString();
-                String lowerName = fieldName.toLowerCase();
-                // Используем конфиг вместо хардкода!
-                for (String sensitive : sensitiveFields) {
-                    if (lowerName.contains(sensitive.toLowerCase())) {
-                        found.add(fieldName);
-                        break;
-                    }
+    private Set<String> findSensitiveFields(Schema<?> schema) {
+        Set<String> found = new LinkedHashSet<>();
+        collectSchemaProperties(schema, new IdentityHashMap<>()).forEach((fieldPath, propertySchema) -> {
+            String lowerName = fieldPath.toLowerCase(Locale.ROOT);
+            for (String sensitive : sensitiveFields) {
+                if (lowerName.contains(sensitive.toLowerCase(Locale.ROOT))) {
+                    found.add(fieldPath);
+                    break;
                 }
             }
-        }
-        
+            if (propertySchema != null) {
+                List<String> enhanced = com.vtb.scanner.heuristics.EnhancedRules.findSensitiveFieldsInResponse(propertySchema);
+                for (String enhancedField : enhanced) {
+                    found.add(fieldPath + "." + enhancedField);
+                }
+            }
+        });
         return found;
     }
     
     /**
      * Поиск read-only полей в схеме
      */
-    @SuppressWarnings("rawtypes")
-    private Set<String> findReadonlyFields(Schema schema) {
-        Set<String> found = new HashSet<>();
-        
-        if (schema.getProperties() != null) {
-            Map properties = schema.getProperties();
-            for (Object entryObj : properties.entrySet()) {
-                Map.Entry entry = (Map.Entry) entryObj;
-                String fieldName = entry.getKey().toString();
-                Schema fieldSchema = (Schema) entry.getValue();
-                
-                // Проверяем readOnly флаг
-                if (Boolean.TRUE.equals(fieldSchema.getReadOnly())) {
-                    found.add(fieldName);
-                    continue;
-                }
-                
-                // Проверяем по имени (из конфига!)
-                String lowerName = fieldName.toLowerCase();
-                for (String readonly : readonlyFields) {
-                    String target = readonly.toLowerCase();
-                    if (lowerName.equals(target)) {
-                        found.add(fieldName);
-                        break;
-                    }
+    private Set<String> findReadonlyFields(Schema<?> schema) {
+        Set<String> found = new LinkedHashSet<>();
+        collectSchemaProperties(schema, new IdentityHashMap<>()).forEach((fieldPath, fieldSchema) -> {
+            if (fieldSchema != null && Boolean.TRUE.equals(fieldSchema.getReadOnly())) {
+                found.add(fieldPath);
+                return;
+            }
+            String lowerName = fieldPath.toLowerCase(Locale.ROOT);
+            for (String readonly : readonlyFields) {
+                if (lowerName.endsWith(readonly.toLowerCase(Locale.ROOT))) {
+                    found.add(fieldPath);
+                    break;
                 }
             }
-        }
-        
+        });
         return found;
     }
 
@@ -528,7 +528,11 @@ public class PropertyAuthScanner implements VulnerabilityScanner {
             if (field == null) {
                 continue;
             }
-            String lowerField = field.toLowerCase(Locale.ROOT);
+            String normalizedField = field.replace("[]", "");
+            String lastSegment = normalizedField.contains(".")
+                ? normalizedField.substring(normalizedField.lastIndexOf('.') + 1)
+                : normalizedField;
+            String lowerField = lastSegment.toLowerCase(Locale.ROOT);
             if (isLegitimateReadonlyField(lowerField, lowerPath, text)) {
                 continue;
             }
@@ -561,11 +565,77 @@ public class PropertyAuthScanner implements VulnerabilityScanner {
         return false;
     }
     
+    private Map<String, Schema<?>> collectSchemaProperties(Schema<?> schema,
+                                                           IdentityHashMap<Schema<?>, Boolean> visited) {
+        Map<String, Schema<?>> properties = new LinkedHashMap<>();
+        collectSchemaPropertiesRecursive(schema, "", visited, properties);
+        return properties;
+    }
+    
+    private void collectSchemaPropertiesRecursive(Schema<?> schema,
+                                                  String prefix,
+                                                  IdentityHashMap<Schema<?>, Boolean> visited,
+                                                  Map<String, Schema<?>> target) {
+        if (schema == null) {
+            return;
+        }
+        if (visited.put(schema, Boolean.TRUE) != null) {
+            return;
+        }
+        try {
+            if (schema.getProperties() != null) {
+                schema.getProperties().forEach((key, value) -> {
+                    if (key == null || !(value instanceof Schema)) {
+                        return;
+                    }
+                    String fieldPath = prefix.isEmpty() ? key : prefix + "." + key;
+                    Schema<?> propertySchema = (Schema<?>) value;
+                    target.put(fieldPath, propertySchema);
+                    if (isObjectLike(propertySchema)) {
+                        collectSchemaPropertiesRecursive(propertySchema, fieldPath, visited, target);
+                    }
+                    if ("array".equalsIgnoreCase(propertySchema.getType()) && propertySchema.getItems() != null) {
+                        collectSchemaPropertiesRecursive(propertySchema.getItems(), fieldPath + "[]", visited, target);
+                    }
+                });
+            }
+            if (schema.getAllOf() != null) {
+                for (Schema<?> fragment : schema.getAllOf()) {
+                    collectSchemaPropertiesRecursive(fragment, prefix, visited, target);
+                }
+            }
+            if (schema.getAnyOf() != null) {
+                for (Schema<?> fragment : schema.getAnyOf()) {
+                    collectSchemaPropertiesRecursive(fragment, prefix, visited, target);
+                }
+            }
+            if (schema.getOneOf() != null) {
+                for (Schema<?> fragment : schema.getOneOf()) {
+                    collectSchemaPropertiesRecursive(fragment, prefix, visited, target);
+                }
+            }
+        } finally {
+            visited.remove(schema);
+        }
+    }
+    
+    private boolean isObjectLike(Schema<?> schema) {
+        if (schema == null) {
+            return false;
+        }
+        if ("object".equalsIgnoreCase(schema.getType()) && schema.getProperties() != null && !schema.getProperties().isEmpty()) {
+            return true;
+        }
+        return (schema.getAllOf() != null && !schema.getAllOf().isEmpty()) ||
+               (schema.getAnyOf() != null && !schema.getAnyOf().isEmpty()) ||
+               (schema.getOneOf() != null && !schema.getOneOf().isEmpty());
+    }
+    
     /**
      * Разрешить $ref ссылку на schema
      * КРИТИЧНО: Гарантирует анализ всех схем даже при ошибках resolve в библиотеке!
      */
-    private Schema resolveSchemaRef(Schema schema, OpenAPI openAPI) {
+    private Schema<?> resolveSchemaRef(Schema<?> schema, OpenAPI openAPI) {
         if (schema == null) {
             return null;
         }
@@ -579,7 +649,7 @@ public class PropertyAuthScanner implements VulnerabilityScanner {
         if (ref.startsWith("#/components/schemas/")) {
             String schemaName = ref.substring("#/components/schemas/".length());
             if (openAPI.getComponents().getSchemas() != null) {
-                Schema resolved = openAPI.getComponents().getSchemas().get(schemaName);
+                Schema<?> resolved = openAPI.getComponents().getSchemas().get(schemaName);
                 if (resolved != null) {
                     log.debug("Разрешена $ref ссылка в PropertyAuthScanner: {} -> {}", ref, schemaName);
                     return resolved;
@@ -588,6 +658,231 @@ public class PropertyAuthScanner implements VulnerabilityScanner {
         }
         
         return schema;
+    }
+
+    private List<String> filterMassAssignmentBusinessContext(List<String> fields,
+                                                             Map<String, Schema<?>> schemaProperties,
+                                                             boolean hasStrongAuthorization,
+                                                             boolean hasExplicitAccess,
+                                                             boolean hasConsentEvidence,
+                                                             boolean isOpenBankingOperation,
+                                                             ContextAnalyzer.APIContext apiContext) {
+        if (fields == null || fields.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<String> result = new ArrayList<>();
+        boolean strongAccess = hasStrongAuthorization || hasExplicitAccess;
+        boolean consentContext = hasConsentEvidence || isOpenBankingOperation;
+        for (String fieldPath : fields) {
+            if (fieldPath == null) {
+                continue;
+            }
+            String lastSegment = extractLastSegment(fieldPath);
+            String lowerField = lastSegment.toLowerCase(Locale.ROOT);
+            Schema<?> propertySchema = getSchemaForPath(schemaProperties, fieldPath);
+
+            boolean skip = false;
+
+            if (isConsentField(lowerField)) {
+                if (strongAccess && hasConsentEvidence) {
+                    skip = true;
+                } else if (consentContext && apiContext == ContextAnalyzer.APIContext.BANKING && strongAccess) {
+                    skip = true;
+                }
+            } else if (isFinancialField(lowerField)) {
+                if (consentContext && strongAccess && hasStrongNumericControls(propertySchema)) {
+                    skip = true;
+                }
+            }
+
+            if (!skip) {
+                result.add(fieldPath);
+            }
+        }
+        return result;
+    }
+
+    private Severity calculateMassAssignmentSeverity(Severity baseSeverity,
+                                                     com.vtb.scanner.semantic.OperationClassifier.OperationType opType,
+                                                     int riskScore,
+                                                     List<String> fields,
+                                                     boolean hasStrongAuthorization,
+                                                     boolean hasExplicitAccess,
+                                                     boolean hasConsentEvidence,
+                                                     boolean isOpenBankingOperation,
+                                                     ContextAnalyzer.APIContext apiContext) {
+        Severity severity = baseSeverity.compareTo(Severity.HIGH) < 0 ? Severity.HIGH : baseSeverity;
+        if (opType == com.vtb.scanner.semantic.OperationClassifier.OperationType.REGISTER ||
+            opType == com.vtb.scanner.semantic.OperationClassifier.OperationType.CREATE) {
+            severity = (severity == Severity.CRITICAL || riskScore > 120) ? Severity.CRITICAL : Severity.HIGH;
+        } else if (opType == com.vtb.scanner.semantic.OperationClassifier.OperationType.UPDATE) {
+            severity = (severity == Severity.CRITICAL || riskScore > 110) ? Severity.CRITICAL : Severity.HIGH;
+        }
+
+        boolean hasPrivilegeField = fields.stream().anyMatch(this::isPrivilegeField);
+        if (hasPrivilegeField) {
+            return severity;
+        }
+
+        boolean strongAccess = hasStrongAuthorization || hasExplicitAccess;
+        boolean consentContext = hasConsentEvidence || isOpenBankingOperation;
+        boolean financialOnly = !fields.isEmpty() && fields.stream().allMatch(this::isFinancialField);
+        boolean consentOnly = !fields.isEmpty() && fields.stream().allMatch(this::isConsentField);
+
+        if (financialOnly && strongAccess && consentContext) {
+            return downgradeSeverity(severity);
+        }
+        if (consentOnly && strongAccess && hasConsentEvidence) {
+            return downgradeSeverity(severity);
+        }
+        if (!hasPrivilegeField && strongAccess && apiContext == ContextAnalyzer.APIContext.BANKING && consentContext) {
+            return severity.compareTo(Severity.MEDIUM) <= 0 ? severity : Severity.MEDIUM;
+        }
+        return severity;
+    }
+
+    private int adjustMassAssignmentRiskScore(int originalRisk,
+                                              Severity baseSeverity,
+                                              Severity finalSeverity,
+                                              boolean hasStrongAuthorization,
+                                              boolean hasExplicitAccess,
+                                              boolean hasConsentEvidence,
+                                              boolean isOpenBankingOperation,
+                                              ContextAnalyzer.APIContext apiContext) {
+        if (finalSeverity.compareTo(baseSeverity) >= 0) {
+            return originalRisk;
+        }
+        boolean strongAccess = hasStrongAuthorization || hasExplicitAccess;
+        boolean consentContext = hasConsentEvidence || isOpenBankingOperation;
+        int adjustment = 10;
+        if (strongAccess && consentContext) {
+            adjustment += 5;
+        }
+        if (apiContext == ContextAnalyzer.APIContext.BANKING) {
+            adjustment += 5;
+        }
+        return Math.max(0, originalRisk - adjustment);
+    }
+
+    private String determineMassAssignmentImpact(List<String> fields, Severity severity) {
+        boolean privilegeField = fields.stream().anyMatch(this::isPrivilegeField);
+        if (privilegeField) {
+            return severity == Severity.CRITICAL
+                ? "PRIVILEGE_ESCALATION: Получение admin прав"
+                : "AUTHORIZATION_BYPASS: Изменение чужих данных";
+        }
+        boolean financialField = fields.stream().anyMatch(this::isFinancialField);
+        if (financialField) {
+            return "BUSINESS_LOGIC: Финансовые лимиты и проверки";
+        }
+        boolean consentField = fields.stream().anyMatch(this::isConsentField);
+        if (consentField) {
+            return "CONSENT_MANAGEMENT: Серверное управление согласиями";
+        }
+        return "AUTHORIZATION_BYPASS: Требуется дополнительная валидация";
+    }
+
+    private String buildMassAssignmentEvidence(List<String> fields,
+                                               boolean hasStrongAuthorization,
+                                               boolean hasExplicitAccess,
+                                               boolean hasConsentEvidence,
+                                               boolean isOpenBankingOperation,
+                                               int adjustedRisk,
+                                               int originalRisk) {
+        StringBuilder builder = new StringBuilder("Поля без явной серверной фильтрации: ")
+            .append(String.join(", ", fields));
+        builder.append(". RiskScore скорректирован с ").append(originalRisk)
+            .append(" до ").append(adjustedRisk).append('.');
+        if (hasStrongAuthorization || hasExplicitAccess) {
+            builder.append(" Обнаружены механизмы сильной авторизации.");
+        }
+        if (hasConsentEvidence) {
+            builder.append(" В спецификации описан consent workflow.");
+        } else if (isOpenBankingOperation) {
+            builder.append(" Open Banking контекст требует ручной проверки согласий.");
+        }
+        return builder.toString();
+    }
+
+    private Schema<?> getSchemaForPath(Map<String, Schema<?>> properties, String fieldPath) {
+        if (properties == null || properties.isEmpty() || fieldPath == null) {
+            return null;
+        }
+        Schema<?> schema = properties.get(fieldPath);
+        if (schema != null) {
+            return schema;
+        }
+        String normalized = fieldPath.replace("[]", "");
+        schema = properties.get(normalized);
+        if (schema != null) {
+            return schema;
+        }
+        if (normalized.contains(".")) {
+            String lastSegment = normalized.substring(normalized.lastIndexOf('.') + 1);
+            schema = properties.get(lastSegment);
+        }
+        return schema;
+    }
+
+    private boolean hasStrongNumericControls(Schema<?> schema) {
+        if (schema == null) {
+            return false;
+        }
+        if (schema.getMinimum() != null || schema.getMaximum() != null ||
+            schema.getExclusiveMinimum() != null || schema.getExclusiveMaximum() != null ||
+            schema.getMultipleOf() != null) {
+            return true;
+        }
+        if (schema.getPattern() != null && !schema.getPattern().isBlank()) {
+            return true;
+        }
+        if (schema.getEnum() != null && !schema.getEnum().isEmpty()) {
+            return true;
+        }
+        if (schema.getConst() != null) {
+            return true;
+        }
+        Schema<?> items = schema.getItems();
+        if (items != null && items.getEnum() != null && !items.getEnum().isEmpty()) {
+            return true;
+        }
+        return false;
+    }
+
+    private Severity downgradeSeverity(Severity current) {
+        return switch (current) {
+            case CRITICAL -> Severity.HIGH;
+            case HIGH -> Severity.MEDIUM;
+            case MEDIUM -> Severity.LOW;
+            default -> current;
+        };
+    }
+
+    private boolean isPrivilegeField(String fieldPath) {
+        String lower = extractLastSegment(fieldPath).toLowerCase(Locale.ROOT);
+        return lower.contains("role") || lower.contains("admin") || lower.contains("privilege") ||
+            lower.contains("permission") || lower.contains("scope");
+    }
+
+    private boolean isFinancialField(String fieldPath) {
+        String lower = extractLastSegment(fieldPath).toLowerCase(Locale.ROOT);
+        return lower.contains("amount") || lower.contains("balance") || lower.contains("price") ||
+            lower.contains("cost") || lower.contains("limit") || lower.contains("threshold");
+    }
+
+    private boolean isConsentField(String fieldPath) {
+        String lower = extractLastSegment(fieldPath).toLowerCase(Locale.ROOT);
+        return lower.contains("consent") || lower.contains("psu") || lower.contains("tpp") ||
+            lower.contains("permissions") || lower.contains("scope");
+    }
+
+    private String extractLastSegment(String fieldPath) {
+        if (fieldPath == null) {
+            return "";
+        }
+        String normalized = fieldPath.replace("[]", "");
+        int idx = normalized.lastIndexOf('.');
+        return idx >= 0 ? normalized.substring(idx + 1) : normalized;
     }
 }
 

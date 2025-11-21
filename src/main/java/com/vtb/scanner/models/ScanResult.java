@@ -1,7 +1,9 @@
 package com.vtb.scanner.models;
 
-import lombok.Data;
+import com.vtb.scanner.dynamic.DynamicScanReport;
 import lombok.Builder;
+import lombok.Data;
+
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -28,6 +30,21 @@ public class ScanResult {
     // Дополнительная информация для тестов
     private String apiContext; // BANKING, HEALTHCARE, etc.
     private long apiHealthScore; // 0-100
+    
+    @Builder.Default
+    private AttackSurfaceSummary attackSurface = AttackSurfaceSummary.builder().build();
+    @Builder.Default
+    private ThreatGraph threatGraph = ThreatGraph.builder().build();
+    @Builder.Default
+    private DataProtectionSummary dataProtection = DataProtectionSummary.builder().build();
+    private int overallRiskScore;
+    private String riskLevel;
+    @Builder.Default
+    private List<String> keyFindings = new ArrayList<>();
+    @Builder.Default
+    private ExecutiveSummary executiveSummary = ExecutiveSummary.builder().build();
+    @Builder.Default
+    private DynamicScanReport dynamicScanReport = DynamicScanReport.empty();
     
     /**
      * Получить количество уязвимостей по критичности

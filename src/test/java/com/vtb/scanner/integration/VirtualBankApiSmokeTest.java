@@ -1,6 +1,8 @@
 package com.vtb.scanner.integration;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.vtb.scanner.core.OpenAPIParser;
 import com.vtb.scanner.core.SecurityScanner;
 import com.vtb.scanner.models.ScanResult;
@@ -15,6 +17,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -90,8 +93,10 @@ class VirtualBankApiSmokeTest {
             "Ожидаем, что LDAP Injection по account_id больше не срабатывает ложным образом");
 
         // Сохраняем полный отчёт для ручного анализа
-        ObjectMapper mapper = new ObjectMapper();
-        Files.writeString(REPORT_FILE, mapper.writerWithDefaultPrettyPrinter().writeValueAsString(result));
+        ObjectMapper mapper = new ObjectMapper()
+            .registerModule(new JavaTimeModule())
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+        mapper.writerWithDefaultPrettyPrinter().writeValue(REPORT_FILE.toFile(), result);
 
         System.out.println("=== Virtual Bank API scan summary ===");
         System.out.println("API: " + parser.getApiTitle() + " v" + parser.getApiVersion());

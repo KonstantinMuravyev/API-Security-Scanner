@@ -1,0 +1,118 @@
+# Extract adapted from GOV.UK Notify API documentation
+# Source: https://notify.gov.uk (Open Government Licence v3.0)
+# Simplified for testing purposes; contains intentional HTTP server entry to trigger TLS checks.
+
+openapi: 3.0.3
+info:
+  title: GOV.UK Notify Messaging API
+  version: 1.0.0-test
+  description: |
+    Government digital service for citizen messaging.
+    Includes email/SMS notifications and template management.
+    This trimmed spec is provided under the UK Open Government Licence v3.0.
+servers:
+  - url: http://api.notifications.service.gov.uk
+    description: Test endpoint (HTTP on purpose to stimulate security findings)
+
+security:
+  - ApiKeyAuth: []
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+  schemas:
+    EmailNotification:
+      type: object
+      properties:
+        id:
+          type: string
+        content:
+          type: object
+          properties:
+            body:
+              type: string
+            subject:
+              type: string
+        api_key:
+          type: string
+          description: |
+            ⚠️ Included in response for legacy integrations.
+            Should be removed; present to trigger secret exposure detection.
+
+paths:
+  /v2/notifications/email:
+    post:
+      summary: Send email notification
+      description: Send transactional email via GOV.UK Notify.
+      operationId: sendEmailNotification
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - template_id
+                - email_address
+              properties:
+                template_id:
+                  type: string
+                email_address:
+                  type: string
+                  format: email
+                personalisation:
+                  type: object
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmailNotification'
+
+  /v2/templates:
+    get:
+      summary: List templates
+      description: |
+        Returns all templates for the service. No pagination for brevity.
+      operationId: listTemplates
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  templates:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        name:
+                          type: string
+
+  /v2/notifications/{notification_id}:
+    get:
+      summary: Get notification status
+      description: Retrieve delivery status by notification id.
+      operationId: getNotificationStatus
+      parameters:
+        - in: path
+          name: notification_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmailNotification'
+

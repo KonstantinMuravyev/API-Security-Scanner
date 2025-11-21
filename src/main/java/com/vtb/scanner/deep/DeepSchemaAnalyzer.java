@@ -37,20 +37,20 @@ public class DeepSchemaAnalyzer {
      * 
      * КРИТИЧНО: Автоматически разрешает $ref ссылки для гарантированного анализа!
      */
-    public static List<SchemaIssue> analyzeRequestBody(Schema schema, String path, String method) {
+    public static List<SchemaIssue> analyzeRequestBody(Schema<?> schema, String path, String method) {
         return analyzeRequestBody(schema, path, method, null);
     }
     
     /**
      * ГЛУБОКИЙ анализ request body schema с поддержкой $ref
      */
-    public static List<SchemaIssue> analyzeRequestBody(Schema schema, String path, String method, OpenAPI openAPI) {
+    public static List<SchemaIssue> analyzeRequestBody(Schema<?> schema, String path, String method, OpenAPI openAPI) {
         List<SchemaIssue> issues = new ArrayList<>();
         
         if (schema == null) return issues;
         
         // КРИТИЧНО: Разрешаем $ref ссылки перед анализом
-        Schema resolvedSchema = resolveSchemaRef(schema, openAPI);
+        Schema<?> resolvedSchema = resolveSchemaRef(schema, openAPI);
         
         // Рекурсивный анализ
         analyzeSchemaRecursive(resolvedSchema, "", path, method, 0, issues, AnalysisType.REQUEST, openAPI);
@@ -64,20 +64,20 @@ public class DeepSchemaAnalyzer {
      * 
      * КРИТИЧНО: Автоматически разрешает $ref ссылки для гарантированного анализа!
      */
-    public static List<SchemaIssue> analyzeResponse(Schema schema, String path, String method) {
+    public static List<SchemaIssue> analyzeResponse(Schema<?> schema, String path, String method) {
         return analyzeResponse(schema, path, method, null);
     }
     
     /**
      * ГЛУБОКИЙ анализ response schema с поддержкой $ref
      */
-    public static List<SchemaIssue> analyzeResponse(Schema schema, String path, String method, OpenAPI openAPI) {
+    public static List<SchemaIssue> analyzeResponse(Schema<?> schema, String path, String method, OpenAPI openAPI) {
         List<SchemaIssue> issues = new ArrayList<>();
         
         if (schema == null) return issues;
         
         // КРИТИЧНО: Разрешаем $ref ссылки перед анализом
-        Schema resolvedSchema = resolveSchemaRef(schema, openAPI);
+        Schema<?> resolvedSchema = resolveSchemaRef(schema, openAPI);
         
         analyzeSchemaRecursive(resolvedSchema, "", path, method, 0, issues, AnalysisType.RESPONSE, openAPI);
         
@@ -116,15 +116,16 @@ public class DeepSchemaAnalyzer {
         // КРИТИЧНО: Разрешаем $ref ссылки рекурсивно с защитой от циклов
         schema = resolveSchemaRef(schema, openAPI, visited);
         
-        if (schema == null || schema.getProperties() == null) return;
-        
-        Map properties = schema.getProperties();
+        Map<String, Schema<?>> properties = collectSchemaProperties(schema);
+        if (properties.isEmpty()) {
+            return;
+        }
         String endpointLower = endpointPath != null ? endpointPath.toLowerCase(Locale.ROOT) : "";
         String methodUpper = method != null ? method.toUpperCase(Locale.ROOT) : "";
         
-        for (Object keyObj : properties.keySet()) {
-            String fieldName = keyObj.toString();
-            Schema fieldSchema = (Schema) properties.get(keyObj);
+        for (Map.Entry<String, Schema<?>> entry : properties.entrySet()) {
+            String fieldName = entry.getKey();
+            Schema<?> fieldSchema = entry.getValue();
             String fieldPath = currentPath.isEmpty() ? fieldName : currentPath + "." + fieldName;
             
             // REQUEST: Проверка на readonly поля (mass assignment!)
@@ -143,8 +144,7 @@ public class DeepSchemaAnalyzer {
             
             // REQUEST: Проверка на системные поля
             if (type == AnalysisType.REQUEST) {
-                String lowerName = fieldName.toLowerCase();
-                String fieldPathLower = fieldPath.toLowerCase();
+                String lowerName = fieldName.toLowerCase(Locale.ROOT);
                 if (shouldSkipRequestField(fieldName, fieldPath, endpointLower, methodUpper)) {
                     continue;
                 }
@@ -165,13 +165,14 @@ public class DeepSchemaAnalyzer {
             
             // RESPONSE: Проверка на чувствительные данные
             if (type == AnalysisType.RESPONSE) {
-                List<String> sensitiveFound = EnhancedRules.findSensitiveFieldsInResponse(schema);
+                List<String> sensitiveFound = EnhancedRules.findSensitiveFieldsInResponse(fieldSchema);
                 for (String sensitive : sensitiveFound) {
                     SchemaIssue issue = new SchemaIssue();
-                    issue.setPath(currentPath + "." + sensitive);
+                    String sensitivePath = fieldPath.isEmpty() ? sensitive : fieldPath + "." + sensitive;
+                    issue.setPath(sensitivePath);
                     issue.setType("SENSITIVE_DATA_EXPOSURE");
                     issue.setSeverity(Severity.HIGH);
-                    issue.setDescription("Чувствительное поле '" + sensitive + "' в response!");
+                    issue.setDescription("Чувствительное поле '" + sensitivePath + "' в response!");
                     issues.add(issue);
                 }
             }
@@ -190,13 +191,14 @@ public class DeepSchemaAnalyzer {
             fieldSchema = resolveSchemaRef(fieldSchema, openAPI, visited);
             
             // Рекурсия для вложенных объектов
-            if (fieldSchema != null && ("object".equals(fieldSchema.getType()) || fieldSchema.getProperties() != null)) {
+            if (fieldSchema != null && ("object".equals(fieldSchema.getType()) || fieldSchema.getProperties() != null ||
+                fieldSchema.getAllOf() != null || fieldSchema.getAnyOf() != null || fieldSchema.getOneOf() != null)) {
                 analyzeSchemaRecursive(fieldSchema, fieldPath, endpointPath, method, depth + 1, issues, type, openAPI, visited);
             }
             
             // Рекурсия для массивов
             if (fieldSchema != null && "array".equals(fieldSchema.getType()) && fieldSchema.getItems() != null) {
-                Schema itemsSchema = resolveSchemaRef(fieldSchema.getItems(), openAPI, visited);
+                Schema<?> itemsSchema = resolveSchemaRef(fieldSchema.getItems(), openAPI, visited);
                 if (itemsSchema != null) {
                     analyzeSchemaRecursive(itemsSchema, fieldPath + "[]", endpointPath, method, depth + 1, issues, type, openAPI, visited);
                 }
@@ -209,14 +211,14 @@ public class DeepSchemaAnalyzer {
      * КРИТИЧНО: Гарантирует, что все схемы будут проанализированы даже при ошибках resolve в библиотеке!
      * КРИТИЧНО: Защита от циклических ссылок для предотвращения StackOverflowError!
      */
-    private static Schema resolveSchemaRef(Schema schema, OpenAPI openAPI) {
+    private static Schema<?> resolveSchemaRef(Schema<?> schema, OpenAPI openAPI) {
         return resolveSchemaRef(schema, openAPI, new HashSet<>());
     }
     
     /**
      * Разрешить $ref ссылку на schema с защитой от циклических ссылок
      */
-    private static Schema resolveSchemaRef(Schema schema, OpenAPI openAPI, Set<String> visited) {
+    private static Schema<?> resolveSchemaRef(Schema<?> schema, OpenAPI openAPI, Set<String> visited) {
         if (schema == null) {
             return null;
         }
@@ -238,7 +240,7 @@ public class DeepSchemaAnalyzer {
             }
             
             if (openAPI.getComponents().getSchemas() != null) {
-                Schema resolved = openAPI.getComponents().getSchemas().get(schemaName);
+                Schema<?> resolved = openAPI.getComponents().getSchemas().get(schemaName);
                 if (resolved != null) {
                     log.debug("Разрешена $ref ссылка: {} -> {}", ref, schemaName);
                     // Добавляем в visited для защиты от циклов
@@ -251,6 +253,57 @@ public class DeepSchemaAnalyzer {
         // Если не удалось разрешить, возвращаем оригинальную schema
         // (может быть это внешняя ссылка или ошибка в спецификации)
         return schema;
+    }
+
+    private static Map<String, Schema<?>> collectSchemaProperties(Schema<?> schema) {
+        return collectSchemaProperties(schema, new IdentityHashMap<>());
+    }
+
+    private static Map<String, Schema<?>> collectSchemaProperties(Schema<?> schema,
+                                                                  IdentityHashMap<Schema<?>, Boolean> visited) {
+        Map<String, Schema<?>> properties = new LinkedHashMap<>();
+        if (schema == null) {
+            return properties;
+        }
+        if (visited.put(schema, Boolean.TRUE) != null) {
+            return properties;
+        }
+        try {
+            if (schema.getProperties() != null) {
+                schema.getProperties().forEach((key, value) -> {
+                    if (key != null && value instanceof Schema) {
+                        properties.put(String.valueOf(key), (Schema<?>) value);
+                    }
+                });
+            }
+            if (schema.getAllOf() != null) {
+                for (Schema<?> fragment : schema.getAllOf()) {
+                    properties.putAll(collectSchemaProperties(fragment, visited));
+                }
+            }
+            if (schema.getAnyOf() != null) {
+                for (Schema<?> fragment : schema.getAnyOf()) {
+                    mergeOptionalProperties(properties, fragment, visited);
+                }
+            }
+            if (schema.getOneOf() != null) {
+                for (Schema<?> fragment : schema.getOneOf()) {
+                    mergeOptionalProperties(properties, fragment, visited);
+                }
+            }
+        } finally {
+            visited.remove(schema);
+        }
+        return properties;
+    }
+
+    private static void mergeOptionalProperties(Map<String, Schema<?>> target,
+                                                Schema<?> schema,
+                                                IdentityHashMap<Schema<?>, Boolean> visited) {
+        Map<String, Schema<?>> from = collectSchemaProperties(schema, visited);
+        for (Map.Entry<String, Schema<?>> entry : from.entrySet()) {
+            target.putIfAbsent(entry.getKey(), entry.getValue());
+        }
     }
     
     @Data

@@ -1,7 +1,8 @@
 package com.vtb.scanner.scanners;
 
 import com.vtb.scanner.core.OpenAPIParser;
-import com.vtb.scanner.heuristics.EnhancedRules;
+import com.vtb.scanner.semantic.ContextAnalyzer;
+import com.vtb.scanner.semantic.OperationClassifier;
 import com.vtb.scanner.models.Severity;
 import com.vtb.scanner.models.Vulnerability;
 import com.vtb.scanner.models.VulnerabilityType;
@@ -31,7 +32,7 @@ public class UnsafeConsumptionScanner implements VulnerabilityScanner {
     
     @Override
     public List<Vulnerability> scan(OpenAPI openAPI, OpenAPIParser parser) {
-        log.info("Запуск Unsafe Consumption Scanner (API10:2023)...");
+        log.info("Запуск Unsafe Consumption Scanner (API10:2023) для {}...", targetUrl);
         List<Vulnerability> vulnerabilities = new ArrayList<>();
         
         // КРИТИЧНО: Защита от NPE
@@ -66,43 +67,39 @@ public class UnsafeConsumptionScanner implements VulnerabilityScanner {
     
     private List<Vulnerability> checkUnsafeConsumption(String path, String method, Operation operation, OpenAPI openAPI) {
         List<Vulnerability> vulnerabilities = new ArrayList<>();
-        
-        // ИСПОЛЬЗУЕМ SmartAnalyzer для контекста!
-        int riskScore = com.vtb.scanner.heuristics.SmartAnalyzer.calculateRiskScore(
-            path, method, operation, openAPI);
+        if (operation == null) {
+            return vulnerabilities;
+        }
+
+        int riskScore = com.vtb.scanner.heuristics.SmartAnalyzer.calculateRiskScore(path, method, operation, openAPI);
         Severity baseSeverity = com.vtb.scanner.heuristics.SmartAnalyzer.severityFromRiskScore(riskScore);
-        
-        // СЕМАНТИКА: определяем тип операции
-        com.vtb.scanner.semantic.OperationClassifier.OperationType opType = 
-            com.vtb.scanner.semantic.OperationClassifier.classify(path, method, operation);
-        
-        // 1. Проверяем упоминание внешних API
-        boolean consumesExternalApi = mentionsExternalApi(operation);
-        
+        OperationClassifier.OperationType opType = OperationClassifier.classify(path, method, operation);
+        ContextAnalyzer.APIContext apiContext = openAPI != null ? ContextAnalyzer.detectContext(openAPI) : ContextAnalyzer.APIContext.GENERAL;
+        boolean telecomContext = apiContext == ContextAnalyzer.APIContext.TELECOM;
+        boolean automotiveContext = apiContext == ContextAnalyzer.APIContext.AUTOMOTIVE;
+
+        String operationText = extractOperationText(operation);
+        boolean consumesExternalApi = mentionsExternalApi(operationText);
+        boolean isWebhook = mentionsWebhook(operationText);
+        boolean hasSignature = hasSignatureEvidence(operationText);
+        boolean hasValidation = hasResponseValidation(operationText);
+        boolean hasTimeout = hasTimeoutMention(operationText);
+        boolean hasRetry = hasRetryMention(operationText);
+        boolean hasResilience = hasResilienceMention(operationText);
+        boolean referencesSensitiveProvider = mentionsSensitiveProvider(operationText);
+
         if (consumesExternalApi) {
-            boolean hasValidation = hasResponseValidation(operation);
-            boolean hasTimeout = hasTimeoutMention(operation);
-            
+            Severity severity = determineExternalSeverity(baseSeverity, apiContext, opType, hasValidation, hasSignature, referencesSensitiveProvider);
+
             if (!hasValidation) {
-                // УМНЫЙ расчёт: SmartAnalyzer + семантика
-                // Для внешних API без валидации - используем SmartAnalyzer
-                Severity severity = switch(baseSeverity) {
-                    case CRITICAL, HIGH -> Severity.HIGH;
-                    case MEDIUM -> Severity.MEDIUM;
-                    default -> Severity.MEDIUM;
-                };
-                
-                Vulnerability tempVuln = Vulnerability.builder()
+                Vulnerability temp = Vulnerability.builder()
                     .type(VulnerabilityType.UNSAFE_API_CONSUMPTION)
                     .severity(severity)
                     .riskScore(riskScore)
                     .build();
-                
-                int confidence = com.vtb.scanner.heuristics.ConfidenceCalculator.calculateConfidence(
-                    tempVuln, operation, false, false);
-                int priority = com.vtb.scanner.heuristics.ConfidenceCalculator.calculatePriority(
-                    tempVuln, confidence);
-                
+                int confidence = com.vtb.scanner.heuristics.ConfidenceCalculator.calculateConfidence(temp, operation, false, false);
+                int priority = com.vtb.scanner.heuristics.ConfidenceCalculator.calculatePriority(temp, confidence);
+
                 vulnerabilities.add(Vulnerability.builder()
                     .id(com.vtb.scanner.models.VulnerabilityIdGenerator.generateId(
                         VulnerabilityType.UNSAFE_API_CONSUMPTION, path, method, null,
@@ -113,32 +110,59 @@ public class UnsafeConsumptionScanner implements VulnerabilityScanner {
                     .confidence(confidence)
                     .priority(priority)
                     .title("Небезопасное потребление внешних API")
-                    .description(String.format(
-                        "Эндпоинт %s %s использует данные от внешнего API, " +
-                        "но не описывает валидацию ответов. " +
-                        "Злоумышленник может контролировать внешний API и отправить вредоносные данные.",
-                        method, path
-                    ))
+                    .description(buildExternalDescription(method, path, opType, apiContext, hasValidation, hasSignature))
                     .endpoint(path)
                     .method(method)
-                    .recommendation(
-                        "При работе с внешними API:\n" +
-                        "1. Валидируйте все данные от third-party\n" +
-                        "2. Не доверяйте внешним данным\n" +
-                        "3. Устанавливайте timeout\n" +
-                        "4. Обрабатывайте ошибки\n" +
-                        "5. Используйте size limits"
-                    )
+                    .recommendation(buildExternalRecommendations(apiContext))
                     .owaspCategory("API10:2023 - Unsafe Consumption of APIs")
+                    .impactLevel(resolveExternalImpact(apiContext, opType))
                     .evidence("Упоминание внешнего API без валидации")
                     .build());
             }
-            
+
+            if (isWebhook && !hasSignature) {
+                Severity webhookSeverity = telecomContext || automotiveContext ? Severity.CRITICAL : Severity.HIGH;
+                Vulnerability temp = Vulnerability.builder()
+                    .type(VulnerabilityType.UNSAFE_API_CONSUMPTION)
+                    .severity(webhookSeverity)
+                    .riskScore(riskScore)
+                    .build();
+                int confidence = com.vtb.scanner.heuristics.ConfidenceCalculator.calculateConfidence(temp, operation, false, false);
+                int priority = com.vtb.scanner.heuristics.ConfidenceCalculator.calculatePriority(temp, confidence);
+
+                vulnerabilities.add(Vulnerability.builder()
+                    .id(com.vtb.scanner.models.VulnerabilityIdGenerator.generateId(
+                        VulnerabilityType.UNSAFE_API_CONSUMPTION, path, method, null,
+                        "Webhook without signature"))
+                    .type(VulnerabilityType.UNSAFE_API_CONSUMPTION)
+                    .severity(webhookSeverity)
+                    .riskScore(riskScore)
+                    .confidence(confidence)
+                    .priority(priority)
+                    .title("Внешний webhook без подписи/секрета")
+                    .description(String.format(
+                        "Эндпоинт %s %s принимает webhook/коллбек, но в спецификации отсутствуют признаки подписи, HMAC или секрета.\n" +
+                        "Это позволяет атакующему подделать отклик внешнего сервиса.",
+                        method, path))
+                    .endpoint(path)
+                    .method(method)
+                    .recommendation("Для всех webhook/API callback используйте HMAC подпись (X-Signature), секреты, mutual TLS или allowlist IP.")
+                    .owaspCategory("API10:2023 - Unsafe Consumption of APIs")
+                    .impactLevel("INTEGRITY_ATTACK: Подделка webhook")
+                    .evidence("Webhook обнаружен, но нет signature/hmac указаний")
+                    .build());
+            }
+
             if (!hasTimeout) {
-                // Для timeout - используем SmartAnalyzer (обычно LOW, но может быть выше для критичных)
-                Severity timeoutSeverity = (baseSeverity == Severity.CRITICAL || riskScore > 100) ? 
-                    Severity.MEDIUM : Severity.LOW;
-                
+                Severity timeoutSeverity = telecomContext || automotiveContext ? Severity.MEDIUM : (baseSeverity == Severity.CRITICAL || riskScore > 100 ? Severity.MEDIUM : Severity.LOW);
+                Vulnerability temp = Vulnerability.builder()
+                    .type(VulnerabilityType.UNSAFE_API_CONSUMPTION)
+                    .severity(timeoutSeverity)
+                    .riskScore(riskScore)
+                    .build();
+                int confidence = com.vtb.scanner.heuristics.ConfidenceCalculator.calculateConfidence(temp, operation, false, false);
+                int priority = com.vtb.scanner.heuristics.ConfidenceCalculator.calculatePriority(temp, confidence);
+
                 vulnerabilities.add(Vulnerability.builder()
                     .id(com.vtb.scanner.models.VulnerabilityIdGenerator.generateId(
                         VulnerabilityType.UNSAFE_API_CONSUMPTION, path, method, null,
@@ -146,72 +170,188 @@ public class UnsafeConsumptionScanner implements VulnerabilityScanner {
                     .type(VulnerabilityType.UNSAFE_API_CONSUMPTION)
                     .severity(timeoutSeverity)
                     .riskScore(riskScore)
-                    .confidence(com.vtb.scanner.heuristics.ConfidenceCalculator.calculateConfidence(
-                        Vulnerability.builder()
-                            .type(VulnerabilityType.UNSAFE_API_CONSUMPTION)
-                            .severity(timeoutSeverity)
-                            .riskScore(riskScore)
-                            .build(),
-                        operation, false, false))
-                    .priority(com.vtb.scanner.heuristics.ConfidenceCalculator.calculatePriority(
-                        Vulnerability.builder()
-                            .type(VulnerabilityType.UNSAFE_API_CONSUMPTION)
-                            .severity(timeoutSeverity)
-                            .build(),
-                        60))
+                    .confidence(confidence)
+                    .priority(priority)
                     .title("Нет timeout для внешнего API")
-                    .description(String.format(
-                        "Эндпоинт %s использует внешний API без timeout. " +
-                        "Медленный внешний сервис может блокировать ваш API.",
-                        path
-                    ))
+                    .description(String.format("Эндпоинт %s использует внешний API без описания timeout. Медленный сервис может блокировать ваш API.", path))
                     .endpoint(path)
                     .method(method)
-                    .recommendation(
-                        "Установите разумные timeout для запросов к внешним API (например, 5-10 сек)"
-                    )
+                    .recommendation("Задайте таймауты (5-10 сек), ограничение на количество повторов и fallback при сбоях внешних API.")
                     .owaspCategory("API10:2023 - Unsafe Consumption of APIs")
-                    .evidence("Нет упоминания timeout")
+                    .impactLevel(resolveTimeoutImpact(apiContext))
+                    .evidence("Нет упоминания timeout при работе с внешним API")
+                    .build());
+            }
+
+            if (!hasRetry && !hasResilience) {
+                Severity resilienceSeverity = telecomContext || automotiveContext ? Severity.HIGH : Severity.MEDIUM;
+                vulnerabilities.add(Vulnerability.builder()
+                    .id(com.vtb.scanner.models.VulnerabilityIdGenerator.generateId(
+                        VulnerabilityType.UNSAFE_API_CONSUMPTION, path, method, null,
+                        "No resilience policies for external API"))
+                    .type(VulnerabilityType.UNSAFE_API_CONSUMPTION)
+                    .severity(resilienceSeverity)
+                    .riskScore(riskScore)
+                    .title("Отсутствуют retry/circuit breaker для внешнего API")
+                    .description(String.format(
+                        "Эндпоинт %s %s использует внешний сервис, но не описывает retry, circuit breaker или fallback.",
+                        method, path))
+                    .endpoint(path)
+                    .method(method)
+                    .recommendation("Опишите retry/backoff, circuit breaker и fallback логику при отказах внешнего сервиса.")
+                    .owaspCategory("API10:2023 - Unsafe Consumption of APIs")
+                    .impactLevel("AVAILABILITY_RISK: Зависимость от нестабильного провайдера")
+                    .confidence(60)
+                    .priority(com.vtb.scanner.heuristics.ConfidenceCalculator.calculatePriority(
+                        Vulnerability.builder().type(VulnerabilityType.UNSAFE_API_CONSUMPTION).severity(resilienceSeverity).build(), 60))
                     .build());
             }
         }
-        
-        // 2. Проверяем слишком большие ответы
+
         vulnerabilities.addAll(checkResponseSizeLimits(path, method, operation, riskScore, baseSeverity, openAPI));
         
         return vulnerabilities;
     }
-    
-    private boolean mentionsExternalApi(Operation operation) {
-        String text = (operation.getDescription() != null ? operation.getDescription() : "") +
-                     (operation.getSummary() != null ? operation.getSummary() : "");
-        String lower = text.toLowerCase();
-        
-        return lower.contains("external") ||
-               lower.contains("third-party") ||
-               lower.contains("third party") ||
-               lower.contains("webhook") ||
-               lower.contains("callback") ||
-               lower.contains("integration") ||
-               lower.contains("proxy") ||
-               lower.contains("fetch");
+
+    private String extractOperationText(Operation operation) {
+        StringBuilder sb = new StringBuilder();
+        if (operation != null) {
+            if (operation.getSummary() != null) {
+                sb.append(operation.getSummary().toLowerCase(Locale.ROOT)).append(' ');
+            }
+            if (operation.getDescription() != null) {
+                sb.append(operation.getDescription().toLowerCase(Locale.ROOT)).append(' ');
+            }
+        }
+        return sb.toString();
+    }
+
+    private Severity determineExternalSeverity(Severity baseSeverity,
+                                               ContextAnalyzer.APIContext context,
+                                               OperationClassifier.OperationType opType,
+                                               boolean hasValidation,
+                                               boolean hasSignature,
+                                               boolean referencesSensitiveProvider) {
+        Severity severity = switch (baseSeverity) {
+            case CRITICAL, HIGH -> Severity.HIGH;
+            case MEDIUM -> Severity.MEDIUM;
+            default -> Severity.MEDIUM;
+        };
+
+        if (opType == OperationClassifier.OperationType.ADMIN_ACTION || referencesSensitiveProvider) {
+            severity = Severity.HIGH;
+        }
+        if (context == ContextAnalyzer.APIContext.BANKING ||
+            context == ContextAnalyzer.APIContext.TELECOM ||
+            context == ContextAnalyzer.APIContext.AUTOMOTIVE) {
+            severity = Severity.HIGH;
+        }
+        if (hasValidation && hasSignature) {
+            severity = severity.compareTo(Severity.MEDIUM) > 0 ? Severity.MEDIUM : severity;
+        }
+        return severity;
+    }
+
+    private String buildExternalDescription(String method,
+                                            String path,
+                                            OperationClassifier.OperationType opType,
+                                            ContextAnalyzer.APIContext context,
+                                            boolean hasValidation,
+                                            boolean hasSignature) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("Эндпоинт %s %s обращается к внешнему API (тип операции: %s). ", method, path, opType));
+        if (!hasValidation) {
+            sb.append("Валидация данных не описана. ");
+        } else {
+            sb.append("Валидация упомянута, но убедитесь, что она строгая. ");
+        }
+        if (!hasSignature) {
+            sb.append("В спецификации нет признаков подписи/секрета. ");
+        }
+        if (context == ContextAnalyzer.APIContext.BANKING) {
+            sb.append("Для банковских интеграций критично контролировать источник и формат ответов. ");
+        } else if (context == ContextAnalyzer.APIContext.TELECOM) {
+            sb.append("Для телеком сервисов отсутствие валидации может привести к взлому биллинга/roaming. ");
+        } else if (context == ContextAnalyzer.APIContext.AUTOMOTIVE) {
+            sb.append("В connected car сценариях это угрожает безопасности транспорта. ");
+        }
+        return sb.toString().trim();
+    }
+
+    private String buildExternalRecommendations(ContextAnalyzer.APIContext context) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("1. Проверяйте схему и тип данных, возвращаемых внешним API.\n");
+        sb.append("2. Используйте allowlist доменов/сертификатов и mutual TLS там, где возможно.\n");
+        sb.append("3. Логируйте и мониторьте ответы третьих сторон.\n");
+        sb.append("4. Добавьте retry/backoff, circuit breaker и таймауты.\n");
+        if (context == ContextAnalyzer.APIContext.BANKING) {
+            sb.append("5. Для финансовых интеграций используйте подпись сообщений и двухсторонний TLS.\n");
+        } else if (context == ContextAnalyzer.APIContext.TELECOM) {
+            sb.append("5. Для телеком-интеграций проверяйте msisdn/сим данные и используйте audit trail.\n");
+        } else if (context == ContextAnalyzer.APIContext.AUTOMOTIVE) {
+            sb.append("5. Для connected car сервисов требуйте сертификаты/подписи OTA-команд.\n");
+        }
+        sb.append("6. Ограничьте размер ответов и фильтруйте непредвиденные поля.");
+        return sb.toString();
+    }
+
+    private String resolveExternalImpact(ContextAnalyzer.APIContext context,
+                                          OperationClassifier.OperationType opType) {
+        if (context == ContextAnalyzer.APIContext.BANKING) {
+            return "FINANCIAL_FRAUD: Компрометация внешнего провайдера";
+        }
+        if (context == ContextAnalyzer.APIContext.TELECOM) {
+            return "TELECOM_OUTAGE: Неконтролируемые ответы внешнего оператора";
+        }
+        if (context == ContextAnalyzer.APIContext.AUTOMOTIVE) {
+            return "CONNECTED_CAR: Вредоносные команды телематике";
+        }
+        if (opType == OperationClassifier.OperationType.ADMIN_ACTION) {
+            return "PRIVILEGE_ESCALATION: Админ действия через внешнее API";
+        }
+        return "INTEGRITY_RISK: Небезопасный внешней источник";
+    }
+
+    private String resolveTimeoutImpact(ContextAnalyzer.APIContext context) {
+        if (context == ContextAnalyzer.APIContext.BANKING || context == ContextAnalyzer.APIContext.TELECOM) {
+            return "SERVICE_OUTAGE: Зависимость от внешнего провайдера";
+        }
+        if (context == ContextAnalyzer.APIContext.AUTOMOTIVE) {
+            return "SAFETY_RISK: Подвисшие команды connected car";
+        }
+        return "AVAILABILITY_RISK: Потенциальное блокирование потоков";
     }
     
-    private boolean hasResponseValidation(Operation operation) {
-        String text = (operation.getDescription() != null ? operation.getDescription() : "") +
-                     (operation.getSummary() != null ? operation.getSummary() : "");
-        String lower = text.toLowerCase();
-        
-        return lower.contains("validat") ||
-               lower.contains("sanitiz") ||
-               lower.contains("verify") ||
-               lower.contains("check");
+    private boolean mentionsExternalApi(String operationText) {
+        return EXTERNAL_API_KEYWORDS.stream().anyMatch(operationText::contains);
     }
-    
-    private boolean hasTimeoutMention(Operation operation) {
-        String text = (operation.getDescription() != null ? operation.getDescription() : "") +
-                     (operation.getSummary() != null ? operation.getSummary() : "");
-        return text.toLowerCase().contains("timeout");
+
+    private boolean mentionsWebhook(String operationText) {
+        return WEBHOOK_KEYWORDS.stream().anyMatch(operationText::contains);
+    }
+
+    private boolean hasSignatureEvidence(String operationText) {
+        return SIGNATURE_KEYWORDS.stream().anyMatch(operationText::contains);
+    }
+
+    private boolean hasResponseValidation(String operationText) {
+        return VALIDATION_KEYWORDS.stream().anyMatch(operationText::contains);
+    }
+
+    private boolean hasTimeoutMention(String operationText) {
+        return TIMEOUT_KEYWORDS.stream().anyMatch(operationText::contains);
+    }
+
+    private boolean hasRetryMention(String operationText) {
+        return RETRY_KEYWORDS.stream().anyMatch(operationText::contains);
+    }
+
+    private boolean hasResilienceMention(String operationText) {
+        return RESILIENCE_KEYWORDS.stream().anyMatch(operationText::contains);
+    }
+
+    private boolean mentionsSensitiveProvider(String operationText) {
+        return SENSITIVE_PROVIDER_KEYWORDS.stream().anyMatch(operationText::contains);
     }
     
     private List<Vulnerability> checkResponseSizeLimits(String path, String method, Operation operation, 
@@ -236,7 +376,7 @@ public class UnsafeConsumptionScanner implements VulnerabilityScanner {
                     contentType.startsWith("application/pdf")) {
                     
                     MediaType mediaType = entry.getValue();
-                    Schema schema = mediaType.getSchema();
+                    Schema<?> schema = mediaType.getSchema();
                     
                     // КРИТИЧНО: Разрешаем $ref ссылки перед проверкой
                     schema = resolveSchemaRef(schema, openAPI);
@@ -286,12 +426,37 @@ public class UnsafeConsumptionScanner implements VulnerabilityScanner {
         
         return vulnerabilities;
     }
-    
+
+    private static final Set<String> EXTERNAL_API_KEYWORDS = Set.of(
+        "external", "third-party", "third party", "integration", "partner api", "supplier api", "proxy", "fetch", "adapter", "msisdn provider"
+    );
+    private static final Set<String> WEBHOOK_KEYWORDS = Set.of(
+        "webhook", "callback", "notification url", "notify url", "push url", "event handler"
+    );
+    private static final Set<String> SIGNATURE_KEYWORDS = Set.of(
+        "signature", "hmac", "secret", "x-signature", "signing", "jwt", "token", "verify signature"
+    );
+    private static final Set<String> VALIDATION_KEYWORDS = Set.of(
+        "validate", "validation", "sanitize", "sanitiz", "verify", "schema", "json schema", "check"
+    );
+    private static final Set<String> TIMEOUT_KEYWORDS = Set.of(
+        "timeout", "time out", "sla", "latency", "request timeout", "socket timeout"
+    );
+    private static final Set<String> RETRY_KEYWORDS = Set.of(
+        "retry", "retries", "backoff", "retry-after", "repeat", "повтор", "exponential backoff"
+    );
+    private static final Set<String> RESILIENCE_KEYWORDS = Set.of(
+        "circuit breaker", "breaker", "bulkhead", "fallback", "graceful degrade", "resilience", "failover"
+    );
+    private static final Set<String> SENSITIVE_PROVIDER_KEYWORDS = Set.of(
+        "aml", "compliance provider", "credit bureau", "roaming", "sim swap", "payment gateway", "telematics hub"
+    );
+
     /**
      * Разрешить $ref ссылку на schema
      * КРИТИЧНО: Гарантирует анализ всех схем даже при ошибках resolve в библиотеке!
      */
-    private Schema resolveSchemaRef(Schema schema, OpenAPI openAPI) {
+    private Schema<?> resolveSchemaRef(Schema<?> schema, OpenAPI openAPI) {
         if (schema == null) {
             return null;
         }
@@ -305,7 +470,7 @@ public class UnsafeConsumptionScanner implements VulnerabilityScanner {
         if (ref.startsWith("#/components/schemas/")) {
             String schemaName = ref.substring("#/components/schemas/".length());
             if (openAPI.getComponents().getSchemas() != null) {
-                Schema resolved = openAPI.getComponents().getSchemas().get(schemaName);
+                Schema<?> resolved = openAPI.getComponents().getSchemas().get(schemaName);
                 if (resolved != null) {
                     log.debug("Разрешена $ref ссылка в UnsafeConsumptionScanner: {} -> {}", ref, schemaName);
                     return resolved;
@@ -316,4 +481,5 @@ public class UnsafeConsumptionScanner implements VulnerabilityScanner {
         return schema;
     }
 }
+
 

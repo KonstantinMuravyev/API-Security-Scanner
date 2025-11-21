@@ -4,6 +4,7 @@ import com.vtb.scanner.core.OpenAPIParser;
 import com.vtb.scanner.models.Severity;
 import com.vtb.scanner.models.Vulnerability;
 import com.vtb.scanner.models.VulnerabilityType;
+import com.vtb.scanner.semantic.ContextAnalyzer;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.PathItem;
@@ -35,7 +36,6 @@ import java.util.*;
 public class GOSTGateway {
     
     private final String gatewayUrl;
-    private final boolean mockMode;
     private final OkHttpClient httpClient;
     
     // Поля, считающиеся персональными данными по ФЗ-152
@@ -98,11 +98,11 @@ public class GOSTGateway {
         }
         
         // 2. Проверка контекста API
-        com.vtb.scanner.semantic.ContextAnalyzer.APIContext context = 
-            com.vtb.scanner.semantic.ContextAnalyzer.detectContext(openAPI);
+        ContextAnalyzer.APIContext context =
+            ContextAnalyzer.detectContext(openAPI);
         
-        if (context == com.vtb.scanner.semantic.ContextAnalyzer.APIContext.BANKING ||
-            context == com.vtb.scanner.semantic.ContextAnalyzer.APIContext.GOVERNMENT) {
+        if (context == ContextAnalyzer.APIContext.BANKING ||
+            context == ContextAnalyzer.APIContext.GOVERNMENT) {
             log.debug("ГОСТ требуется для контекста: {}", context);
             return true;
         }
@@ -160,15 +160,14 @@ public class GOSTGateway {
     }
     
     /**
-     * @param gatewayUrl URL ГОСТ-шлюза (если null - работает в mock режиме)
+     * @param gatewayUrl URL ГОСТ-шлюза. Если не указан — выполняются только локальные проверки.
      */
     public GOSTGateway(String gatewayUrl) {
-        this.gatewayUrl = gatewayUrl;
-        this.mockMode = (gatewayUrl == null || gatewayUrl.isEmpty());
+        this.gatewayUrl = (gatewayUrl != null && !gatewayUrl.isBlank()) ? gatewayUrl : null;
         this.httpClient = new OkHttpClient.Builder().build();
         
-        if (mockMode) {
-            log.info("ГОСТ Gateway работает в MOCK режиме (демо)");
+        if (this.gatewayUrl == null) {
+            log.info("ГОСТ-шлюз не указан – выполняем локальные проверки без внешнего сервиса.");
         } else {
             log.info("ГОСТ Gateway URL: {}", gatewayUrl);
         }
@@ -206,7 +205,11 @@ public class GOSTGateway {
         if (targetUrl != null && targetUrl.startsWith("https://")) {
             log.info("Запуск РЕАЛЬНОЙ ГОСТ TLS проверки...");
             log.info("⚡ Подключаемся к серверу для анализа криптографии...");
-            TLSAnalyzer tlsAnalyzer = new TLSAnalyzer(targetUrl);
+            ContextAnalyzer.APIContext context = ContextAnalyzer.detectContext(openAPI);
+            boolean enforceGost = context == ContextAnalyzer.APIContext.BANKING ||
+                context == ContextAnalyzer.APIContext.GOVERNMENT ||
+                context == ContextAnalyzer.APIContext.HEALTHCARE;
+            TLSAnalyzer tlsAnalyzer = new TLSAnalyzer(targetUrl, context, enforceGost);
             vulnerabilities.addAll(tlsAnalyzer.analyzeTLS());
         } else if (targetUrl != null && targetUrl.startsWith("http://")) {
             // HTTP вместо HTTPS - КРИТИЧНО для ГОСТ!
@@ -239,7 +242,7 @@ public class GOSTGateway {
         }
         
         // 5. Проверка через реальный ГОСТ-шлюз (если доступен)
-        if (!mockMode && gatewayUrl != null) {
+        if (gatewayUrl != null) {
             log.info("Проверка через внешний ГОСТ-шлюз: {}", gatewayUrl);
             vulnerabilities.addAll(checkViaGateway(openAPI));
         }
@@ -406,7 +409,6 @@ public class GOSTGateway {
         
         for (Map.Entry<String, PathItem> entry : openAPI.getPaths().entrySet()) {
             String path = entry.getKey();
-            PathItem pathItem = entry.getValue();
             
             // Проверяем все операции
             Map<String, Operation> operations = parser.getOperationsForPath(path);
@@ -428,7 +430,7 @@ public class GOSTGateway {
                 
                 if (hasPersonalData) {
                     boolean requiresAuth = parser.requiresAuthentication(operation);
-                    boolean explicitAccess = com.vtb.scanner.util.AccessControlHeuristics.hasExplicitAccessControl(operation, path);
+                    boolean explicitAccess = com.vtb.scanner.util.AccessControlHeuristics.hasExplicitAccessControl(operation, path, openAPI);
                     
                     if (!requiresAuth || !explicitAccess) {
                         vulnerabilities.add(Vulnerability.builder()
@@ -519,13 +521,13 @@ public class GOSTGateway {
         List<Vulnerability> vulnerabilities = new ArrayList<>();
         
         try {
-            log.info("Отправка запроса на ГОСТ-шлюз: {}", gatewayUrl);
-            
-            // Формируем запрос к шлюзу
+            String payload = io.swagger.v3.core.util.Json.mapper().writeValueAsString(openAPI);
             RequestBody body = RequestBody.create(
-                "{}",  // Здесь должна быть сериализованная спецификация
+                payload,
                 MediaType.get("application/json")
             );
+
+            log.info("Отправка запроса на ГОСТ-шлюз: {}", gatewayUrl);
             
             Request request = new Request.Builder()
                 .url(gatewayUrl + "/api/check")
@@ -541,6 +543,8 @@ public class GOSTGateway {
                 }
             }
             
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            log.error("Не удалось сериализовать OpenAPI для ГОСТ-шлюза: {}", e.getMessage());
         } catch (IOException e) {
             log.error("Ошибка при обращении к ГОСТ-шлюзу: {}", e.getMessage());
         }
@@ -552,7 +556,7 @@ public class GOSTGateway {
      * Проверить является ли ГОСТ-шлюз доступным
      */
     public boolean isGatewayAvailable() {
-        if (mockMode) {
+        if (gatewayUrl == null) {
             return false;
         }
         

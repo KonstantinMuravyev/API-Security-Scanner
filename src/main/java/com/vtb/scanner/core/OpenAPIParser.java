@@ -32,12 +32,13 @@ public class OpenAPIParser {
     private Path tempFileToDelete; // Временный файл, который нужно удалить после парсинга
     
     // Конфигурируемые лимиты для больших API
-    // Можно увеличить через системное свойство: -Dscanner.max.file.size.mb=5000
-    private static final long MAX_FILE_SIZE_MB = Long.parseLong(
-        System.getProperty("scanner.max.file.size.mb", "5000")); // По умолчанию 5 GB!
     private static final long LARGE_FILE_THRESHOLD = 3_000_000; // 3 MB
     private static final long VERY_LARGE_FILE_THRESHOLD = 100_000_000; // 100 MB - используем memory-mapped files
     private static final long HUGE_FILE_THRESHOLD = 1_000_000_000; // 1 GB - только streaming парсинг
+
+    private static long getMaxFileSizeMb() {
+        return Long.parseLong(System.getProperty("scanner.max.file.size.mb", "5000"));
+    }
     
     /**
      * Установить OpenAPI объект напрямую (для тестов!)
@@ -93,11 +94,12 @@ public class OpenAPIParser {
                 log.info("Размер файла по URL: {} MB", contentLengthMB);
                 }
                 
-                if (contentLength > MAX_FILE_SIZE_MB * 1024 * 1024) {
+                long maxFileSizeMb = getMaxFileSizeMb();
+                if (contentLength > maxFileSizeMb * 1024 * 1024) {
                     throw new IllegalArgumentException(
                         String.format("Файл слишком большой: %d MB (максимум: %d MB). " +
                             "Увеличьте лимит через -Dscanner.max.file.size.mb=<размер>", 
-                            contentLengthMB, MAX_FILE_SIZE_MB));
+                            contentLengthMB, maxFileSizeMb));
                 }
                 
                 if (contentLength > HUGE_FILE_THRESHOLD) {
@@ -120,14 +122,15 @@ public class OpenAPIParser {
                 long totalRead = 0;
                 int bytesRead;
                 
+                long maxFileSizeMb = getMaxFileSizeMb();
                 while ((bytesRead = inputStream.read(buffer)) != -1) {
                     outputStream.write(buffer, 0, bytesRead);
                     totalRead += bytesRead;
                     
                     // Проверяем размер во время скачивания
-                    if (contentLength <= 0 && totalRead > MAX_FILE_SIZE_MB * 1024 * 1024) {
+                    if (contentLength <= 0 && totalRead > maxFileSizeMb * 1024 * 1024) {
                         throw new IllegalArgumentException(
-                            String.format("Файл превышает лимит: %d MB", MAX_FILE_SIZE_MB));
+                            String.format("Файл превышает лимит: %d MB", maxFileSizeMb));
                     }
                 }
                 
@@ -138,7 +141,7 @@ public class OpenAPIParser {
             // Сохраняем ссылку на временный файл для удаления после завершения resolve
             tempFileToDelete = tempFile;
             try {
-                parseSpecification(tempFile.toFile().getAbsolutePath());
+            parseSpecification(tempFile.toFile().getAbsolutePath());
             } catch (Exception e) {
                 // КРИТИЧНО: Если parseSpecification выбросит исключение, файл все равно нужно удалить
                 // Удаляем временный файл при ошибке парсинга
@@ -248,18 +251,19 @@ public class OpenAPIParser {
             fileSizeBytes = file.length();
             fileSizeMB = fileSizeBytes / (1024 * 1024);
             fileSizeGB = fileSizeMB / 1024;
+            long maxFileSizeMb = getMaxFileSizeMb();
             
-        if (fileSizeGB > 0) {
+            if (fileSizeGB > 0) {
             log.info("Размер файла: {} GB ({} MB)", fileSizeGB, fileSizeMB);
-        } else {
+            } else {
             log.info("Размер файла: {} MB", fileSizeMB);
             }
         
-            if (fileSizeBytes > MAX_FILE_SIZE_MB * 1024 * 1024) {
+            if (fileSizeBytes > maxFileSizeMb * 1024 * 1024) {
                 throw new IllegalArgumentException(
                     String.format("Файл слишком большой: %d MB (максимум: %d MB). " +
                         "Увеличьте лимит через -Dscanner.max.file.size.mb=<размер>", 
-                        fileSizeMB, MAX_FILE_SIZE_MB));
+                        fileSizeMB, maxFileSizeMb));
             }
         }
         
@@ -373,7 +377,7 @@ public class OpenAPIParser {
                     "Возможные причины:\n" +
                     "1. Файл поврежден или не является валидной OpenAPI спецификацией\n" +
                     "2. Для больших файлов (> 3 MB) используйте JSON формат вместо YAML\n" +
-                    "3. Проверьте размер файла (максимум: " + MAX_FILE_SIZE_MB + " MB)\n" +
+                    "3. Проверьте размер файла (максимум: " + getMaxFileSizeMb() + " MB)\n" +
                     "Примеры больших API в JSON:\n" +
                     "  - GitHub: https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.json");
             }

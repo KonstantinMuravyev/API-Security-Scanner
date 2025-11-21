@@ -238,7 +238,7 @@ class NewPatternsIntegrationTest {
         List<com.vtb.scanner.models.Vulnerability> vulns = scanner.scan(api, parser);
         
         com.vtb.scanner.models.Vulnerability pathTraversal = vulns.stream()
-            .filter(v -> (v.getId().startsWith("SSRF-") || v.getId().startsWith("RES-")) &&
+            .filter(v -> (v.getId().startsWith("SSRF-") || v.getId().startsWith("RES-") || v.getId().startsWith("MISC-")) &&
                         (v.getDescription().contains("path traversal") || v.getDescription().contains("../../") ||
                          v.getTitle().contains("Path Traversal") || v.getTitle().contains("путь")))
             .findFirst()

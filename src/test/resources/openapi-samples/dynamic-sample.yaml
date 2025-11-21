@@ -1,0 +1,39 @@
+openapi: 3.0.1
+info:
+  title: Dynamic Sample API
+  version: 1.0.0
+servers:
+  - url: http://localhost
+paths:
+  /public/info:
+    get:
+      summary: Public info endpoint without auth
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+  /secure/accounts/{accountId}:
+    get:
+      summary: Protected account resource
+      security:
+        - basicAuth: []
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic

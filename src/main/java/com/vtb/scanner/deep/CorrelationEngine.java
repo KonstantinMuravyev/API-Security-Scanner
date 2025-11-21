@@ -26,6 +26,8 @@ public class CorrelationEngine {
      * 4. Batch: /users/batch → /users/{id}
      * 5. Search: /users/search → /users/{id}
      */
+    private static final int MAX_CHAIN_COUNT = 2000;
+
     public static List<BOLAChain> findBOLAChains(OpenAPI openAPI) {
         List<BOLAChain> chains = new ArrayList<>();
         
@@ -58,7 +60,13 @@ public class CorrelationEngine {
             String basePath = resourcePath.substring(0, lastSlashIndex);
             
             if (paths.containsKey(basePath)) {
-                chains.addAll(checkPair(basePath, resourcePath, paths));
+                List<BOLAChain> newChains = checkPair(basePath, resourcePath, paths);
+                if (!newChains.isEmpty()) {
+                    chains.addAll(newChains);
+                    if (limitReached(chains)) {
+                        return chains;
+                    }
+                }
             }
         }
         
@@ -74,7 +82,13 @@ public class CorrelationEngine {
                 
                 for (String resourcePath : resourcePaths) {
                     if (resourcePath.toLowerCase().contains(resourceType)) {
-                        chains.addAll(checkPair(listPath, resourcePath, paths));
+                        List<BOLAChain> newChains = checkPair(listPath, resourcePath, paths);
+                        if (!newChains.isEmpty()) {
+                            chains.addAll(newChains);
+                            if (limitReached(chains)) {
+                                return chains;
+                            }
+                        }
                     }
                 }
             }
@@ -87,7 +101,13 @@ public class CorrelationEngine {
                 
                 for (String resourcePath : resourcePaths) {
                     if (resourcePath.toLowerCase().contains(resourceType)) {
-                        chains.addAll(checkPair(listPath, resourcePath, paths));
+                        List<BOLAChain> newChains = checkPair(listPath, resourcePath, paths);
+                        if (!newChains.isEmpty()) {
+                            chains.addAll(newChains);
+                            if (limitReached(chains)) {
+                                return chains;
+                            }
+                        }
                     }
                 }
             }
@@ -107,7 +127,13 @@ public class CorrelationEngine {
             for (String resourcePath2 : resourcePaths) {
                 if (!resourcePath1.equals(resourcePath2) && resourcePath2.startsWith(basePath)) {
                     // resourcePath2 является вложенным в resourcePath1
-                    chains.addAll(checkPair(resourcePath1, resourcePath2, paths));
+                    List<BOLAChain> newChains = checkPair(resourcePath1, resourcePath2, paths);
+                    if (!newChains.isEmpty()) {
+                        chains.addAll(newChains);
+                        if (limitReached(chains)) {
+                            return chains;
+                        }
+                    }
                 }
             }
         }
@@ -123,13 +149,27 @@ public class CorrelationEngine {
                 // Например: /orders/{userId} связан с /users
                 if (lowerResourcePath.contains("{" + resourceType.toLowerCase() + "id}") ||
                     lowerResourcePath.contains("{" + resourceType.toLowerCase() + "_id}")) {
-                    chains.addAll(checkPair(listPath, resourcePath, paths));
+                    List<BOLAChain> newChains = checkPair(listPath, resourcePath, paths);
+                    if (!newChains.isEmpty()) {
+                        chains.addAll(newChains);
+                        if (limitReached(chains)) {
+                            return chains;
+                        }
+                    }
                 }
             }
         }
         
         log.info("Найдено BOLA цепочек: {} (5 типов проверок)", chains.size());
         return chains;
+    }
+
+    private static boolean limitReached(List<BOLAChain> chains) {
+        if (chains.size() >= MAX_CHAIN_COUNT) {
+            log.warn("BOLA correlation truncated at {} chains for performance reasons", MAX_CHAIN_COUNT);
+            return true;
+        }
+        return false;
     }
     
     /**

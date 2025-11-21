@@ -1,5 +1,7 @@
 package com.vtb.scanner.scanners;
 
+import com.vtb.scanner.analysis.SchemaConstraintAnalyzer;
+import com.vtb.scanner.analysis.SchemaConstraintAnalyzer.SchemaConstraints;
 import com.vtb.scanner.core.OpenAPIParser;
 import com.vtb.scanner.heuristics.EnhancedRules;
 import com.vtb.scanner.knowledge.CVEMapper;
@@ -19,6 +21,10 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.Objects;
+import java.util.LinkedHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Сканер для обнаружения уязвимостей инъекций
@@ -37,6 +43,7 @@ public class InjectionScanner implements VulnerabilityScanner {
     private static final int MAX_DEPTH = 20; // Увеличено с 10 до 20 для более точного анализа сложных API
     
     private final String targetUrl;
+    private static final Pattern PARAM_IN_TITLE = Pattern.compile("'([^']+)'");
     
     // ВСЕ паттерны теперь в EnhancedRules! Никакого хардкода!
     
@@ -53,39 +60,146 @@ public class InjectionScanner implements VulnerabilityScanner {
         if (openAPI == null || openAPI.getPaths() == null) {
             return vulnerabilities;
         }
+
+        SchemaConstraintAnalyzer constraintAnalyzer = new SchemaConstraintAnalyzer(openAPI);
         
         for (Map.Entry<String, PathItem> entry : openAPI.getPaths().entrySet()) {
             String path = entry.getKey();
             PathItem pathItem = entry.getValue();
             
-            vulnerabilities.addAll(checkPathForInjection(path, pathItem, openAPI));
+            vulnerabilities.addAll(checkPathForInjection(path, pathItem, openAPI, constraintAnalyzer));
         }
         
         log.info("Injection Scanner завершен. Найдено уязвимостей: {}", vulnerabilities.size());
         return vulnerabilities;
     }
     
+    private void mergeOrAdd(List<Vulnerability> vulnerabilities, Vulnerability newVuln, String paramName) {
+        if (newVuln == null) {
+            return;
+        }
+        for (Vulnerability existing : vulnerabilities) {
+            if (existing == null) {
+                continue;
+            }
+            if (existing.getType() == newVuln.getType()
+                && Objects.equals(existing.getEndpoint(), newVuln.getEndpoint())
+                && Objects.equals(existing.getMethod(), newVuln.getMethod())) {
+                
+                if (paramName != null && !paramName.isBlank()) {
+                    String title = existing.getTitle();
+                    if (title != null && !title.contains("'" + paramName + "'")) {
+                        existing.setTitle(title + " (также '" + paramName + "')");
+                    }
+                    String description = existing.getDescription();
+                    if (description == null) {
+                        existing.setDescription("Дополнительно уязвим параметр '" + paramName + "'.");
+                    } else if (!description.contains("'" + paramName + "'")) {
+                        existing.setDescription(description + "\n\nДополнительно уязвим параметр '" + paramName + "'.");
+                    }
+                    String evidence = existing.getEvidence();
+                    String marker = "param=" + paramName;
+                    if (evidence == null || !evidence.contains(marker)) {
+                        String prefix = evidence != null && !evidence.isBlank() ? evidence + "; " : "";
+                        existing.setEvidence(prefix + marker);
+                    }
+                }
+                return;
+            }
+        }
+        vulnerabilities.add(newVuln);
+    }
+    
+    private void mergeParameterVulnerability(Map<String, Vulnerability> accumulator, Vulnerability newVuln) {
+        if (newVuln == null) {
+            return;
+        }
+        String key = buildSignatureKey(newVuln);
+        Vulnerability existing = accumulator.get(key);
+        if (existing == null) {
+            accumulator.put(key, newVuln);
+            return;
+        }
+        
+        String paramName = extractParamNameFromTitle(newVuln);
+        if (paramName != null && !paramName.isBlank()) {
+            String title = existing.getTitle();
+            if (title != null && !title.contains("'" + paramName + "'")) {
+                existing.setTitle(title + " (также '" + paramName + "')");
+            }
+            String description = existing.getDescription();
+            if (description == null) {
+                existing.setDescription("Дополнительно уязвим параметр '" + paramName + "'.");
+            } else if (!description.contains("'" + paramName + "'")) {
+                existing.setDescription(description + "\n\nДополнительно уязвим параметр '" + paramName + "'.");
+            }
+            String existingEvidence = existing.getEvidence();
+            String newEvidence = newVuln.getEvidence();
+            if (newEvidence != null && (existingEvidence == null || !existingEvidence.contains(newEvidence))) {
+                String prefix = existingEvidence != null && !existingEvidence.isBlank() ? existingEvidence + "; " : "";
+                existing.setEvidence(prefix + newEvidence);
+            }
+        }
+        
+        existing.setSeverity(higherSeverity(existing.getSeverity(), newVuln.getSeverity()));
+        existing.setRiskScore(Math.max(existing.getRiskScore(), newVuln.getRiskScore()));
+        existing.setConfidence(Math.max(existing.getConfidence(), newVuln.getConfidence()));
+    }
+    
+    private String buildSignatureKey(Vulnerability vuln) {
+        String method = vuln.getMethod() != null ? vuln.getMethod() : "N/A";
+        String endpoint = vuln.getEndpoint() != null ? vuln.getEndpoint() : "N/A";
+        String type = vuln.getType() != null ? vuln.getType().name() : "UNKNOWN";
+        return method + "|" + endpoint + "|" + type;
+    }
+    
+    private String extractParamNameFromTitle(Vulnerability vulnerability) {
+        if (vulnerability == null) {
+            return null;
+        }
+        String title = vulnerability.getTitle();
+        if (title == null) {
+            return null;
+        }
+        Matcher matcher = PARAM_IN_TITLE.matcher(title);
+        if (matcher.find()) {
+            return matcher.group(1);
+        }
+        return null;
+    }
+    
+    private Severity higherSeverity(Severity current, Severity candidate) {
+        if (current == null) {
+            return candidate;
+        }
+        if (candidate == null) {
+            return current;
+        }
+        return candidate.getPriority() > current.getPriority() ? candidate : current;
+    }
+    
     /**
      * Проверка пути на инъекции
      */
-    private List<Vulnerability> checkPathForInjection(String path, PathItem pathItem, OpenAPI openAPI) {
+    private List<Vulnerability> checkPathForInjection(String path, PathItem pathItem, OpenAPI openAPI,
+                                                      SchemaConstraintAnalyzer constraintAnalyzer) {
         List<Vulnerability> vulnerabilities = new ArrayList<>();
         
         // Проверяем все методы - ПЕРЕДАЁМ openAPI для SmartAnalyzer!
         if (pathItem.getGet() != null) {
-            vulnerabilities.addAll(checkOperationForInjection(path, "GET", pathItem.getGet(), openAPI));
+            vulnerabilities.addAll(checkOperationForInjection(path, "GET", pathItem.getGet(), openAPI, constraintAnalyzer));
         }
         if (pathItem.getPost() != null) {
-            vulnerabilities.addAll(checkOperationForInjection(path, "POST", pathItem.getPost(), openAPI));
+            vulnerabilities.addAll(checkOperationForInjection(path, "POST", pathItem.getPost(), openAPI, constraintAnalyzer));
         }
         if (pathItem.getPut() != null) {
-            vulnerabilities.addAll(checkOperationForInjection(path, "PUT", pathItem.getPut(), openAPI));
+            vulnerabilities.addAll(checkOperationForInjection(path, "PUT", pathItem.getPut(), openAPI, constraintAnalyzer));
         }
         if (pathItem.getDelete() != null) {
-            vulnerabilities.addAll(checkOperationForInjection(path, "DELETE", pathItem.getDelete(), openAPI));
+            vulnerabilities.addAll(checkOperationForInjection(path, "DELETE", pathItem.getDelete(), openAPI, constraintAnalyzer));
         }
         if (pathItem.getPatch() != null) {
-            vulnerabilities.addAll(checkOperationForInjection(path, "PATCH", pathItem.getPatch(), openAPI));
+            vulnerabilities.addAll(checkOperationForInjection(path, "PATCH", pathItem.getPatch(), openAPI, constraintAnalyzer));
         }
         
         return vulnerabilities;
@@ -94,19 +208,28 @@ public class InjectionScanner implements VulnerabilityScanner {
     /**
      * Проверка операции на инъекции
      */
-    private List<Vulnerability> checkOperationForInjection(String path, String method, Operation operation, OpenAPI openAPI) {
+    private List<Vulnerability> checkOperationForInjection(String path, String method, Operation operation,
+                                                           OpenAPI openAPI,
+                                                           SchemaConstraintAnalyzer constraintAnalyzer) {
         List<Vulnerability> vulnerabilities = new ArrayList<>();
         
         // ТЕПЕРЬ МОЖЕМ использовать SmartAnalyzer!
         int riskScore = com.vtb.scanner.heuristics.SmartAnalyzer.calculateRiskScore(
             path, method, operation, openAPI);
         
+        Map<String, Vulnerability> parameterVulnMap = new LinkedHashMap<>();
+        
         // Проверяем параметры (передаем operation для семантики!)
         if (operation.getParameters() != null) {
             for (Parameter param : operation.getParameters()) {
-                vulnerabilities.addAll(checkParameter(path, method, param, operation, riskScore));
+                List<Vulnerability> paramVulnerabilities = checkParameter(path, method, param, operation,
+                    riskScore, constraintAnalyzer);
+                for (Vulnerability vuln : paramVulnerabilities) {
+                    mergeParameterVulnerability(parameterVulnMap, vuln);
+                }
             }
         }
+        vulnerabilities.addAll(parameterVulnMap.values());
         
         // Проверяем request body
         if (operation.getRequestBody() != null && 
@@ -139,7 +262,7 @@ public class InjectionScanner implements VulnerabilityScanner {
                         (contentType.contains("json") || contentType.equals("*/*"))) {
                         
                         if (mediaType != null && mediaType.getSchema() != null) {
-                            io.swagger.v3.oas.models.media.Schema schema = mediaType.getSchema();
+                            Schema schema = mediaType.getSchema();
                             
                             // Если schema - это $ref, пытаемся разрешить через OpenAPI
                             if (schema.get$ref() != null && openAPI != null) {
@@ -148,7 +271,7 @@ public class InjectionScanner implements VulnerabilityScanner {
                             
                             if (schema != null) {
                                 vulnerabilities.addAll(checkRequestBodySchema(
-                                    path, method, schema, operation, riskScore, openAPI));
+                                    path, method, schema, operation, riskScore, openAPI, constraintAnalyzer));
                             }
                         }
                     }
@@ -165,9 +288,20 @@ public class InjectionScanner implements VulnerabilityScanner {
      * С СЕМАНТИЧЕСКИМ АНАЛИЗОМ + SmartAnalyzer (96 факторов!)
      */
     private List<Vulnerability> checkParameter(String path, String method, Parameter param,
-                                               Operation operation, int riskScore) {
+                                               Operation operation, int riskScore,
+                                               SchemaConstraintAnalyzer constraintAnalyzer) {
         List<Vulnerability> vulnerabilities = new ArrayList<>();
         String paramName = param.getName();
+
+        SchemaConstraints schemaConstraints = constraintAnalyzer != null
+            ? constraintAnalyzer.analyzeParameter(param)
+            : SchemaConstraints.empty();
+
+        if (schemaConstraints != null && !schemaConstraints.isUserControlled()) {
+            log.debug("Параметр '{}' помечен как readOnly/неуправляемый пользователем — пропускаем инъекционные проверки.",
+                paramName);
+            return vulnerabilities;
+        }
         
         // СЕМАНТИЧЕСКИЙ АНАЛИЗ - если это SEARCH/QUERY операция → SQL риск выше!
         com.vtb.scanner.semantic.OperationClassifier.OperationType opType = 
@@ -180,7 +314,7 @@ public class InjectionScanner implements VulnerabilityScanner {
         // Это учитывает: финансовые операции, админ пути, PII данные, и т.д.
         
         // 1. SQL Injection - используем EnhancedRules + СЕМАНТИКУ + SmartAnalyzer!
-        if (EnhancedRules.isSQLInjectionRisk(param)) {
+        if (EnhancedRules.isSQLInjectionRisk(param, schemaConstraints)) {
             int validationScore = EnhancedRules.scoreValidation(param);
             
             // УМНЫЙ расчёт severity:
@@ -220,7 +354,7 @@ public class InjectionScanner implements VulnerabilityScanner {
                 CodeExamples.CodeExample example = 
                     CodeExamples.getExample(VulnerabilityType.SQL_INJECTION);
                 
-                vulnerabilities.add(Vulnerability.builder()
+                Vulnerability sqlVuln = Vulnerability.builder()
                     .id(com.vtb.scanner.models.VulnerabilityIdGenerator.generateId(
                         VulnerabilityType.SQL_INJECTION, path, method, paramName, 
                         "SQL Injection risk in parameter"))
@@ -252,16 +386,19 @@ public class InjectionScanner implements VulnerabilityScanner {
                     .riskScore(riskScore) // Сохраняем для анализа!
                     .cwe(knowledge != null ? knowledge.getCwe() : null)
                     .cveExamples(knowledge != null ? knowledge.getCveExamples() : null)
-                    .build());
+                    .build();
+                if (applySchemaGuards(sqlVuln, schemaConstraints)) {
+                    mergeOrAdd(vulnerabilities, sqlVuln, paramName);
+                }
             }
         }
         
         // 2. Command Injection - КРИТИЧНО!
-        if (EnhancedRules.isCommandInjectionRisk(param)) {
+        if (EnhancedRules.isCommandInjectionRisk(param, schemaConstraints)) {
             CVEMapper.VulnerabilityKnowledge knowledge = 
                 CVEMapper.getKnowledge(VulnerabilityType.COMMAND_INJECTION);
             
-            vulnerabilities.add(Vulnerability.builder()
+            Vulnerability commandVuln = Vulnerability.builder()
                 .id(com.vtb.scanner.models.VulnerabilityIdGenerator.generateId(
                     VulnerabilityType.COMMAND_INJECTION, path, method, paramName,
                     "Command Injection risk in parameter"))
@@ -292,15 +429,18 @@ public class InjectionScanner implements VulnerabilityScanner {
                 .evidence("Параметр может быть передан в shell")
                 .cwe(knowledge != null ? knowledge.getCwe() : null)
                 .cveExamples(knowledge != null ? knowledge.getCveExamples() : null)
-                .build());
+                .build();
+            if (applySchemaGuards(commandVuln, schemaConstraints)) {
+                mergeOrAdd(vulnerabilities, commandVuln, paramName);
+            }
         }
         
         // 3. SSRF - используем EnhancedRules
-        if (EnhancedRules.isSSRFRisk(param)) {
+        if (EnhancedRules.isSSRFRisk(param, schemaConstraints)) {
             CVEMapper.VulnerabilityKnowledge knowledge = 
                 CVEMapper.getKnowledge(VulnerabilityType.SSRF);
             
-            vulnerabilities.add(Vulnerability.builder()
+            Vulnerability ssrfVuln = Vulnerability.builder()
                 .id(com.vtb.scanner.models.VulnerabilityIdGenerator.generateId(
                     VulnerabilityType.SSRF, path, method, paramName,
                     "SSRF risk in parameter"))
@@ -333,14 +473,17 @@ public class InjectionScanner implements VulnerabilityScanner {
                 .evidence("URL параметр без валидации")
                 .cwe(knowledge != null ? knowledge.getCwe() : null)
                 .cveExamples(knowledge != null ? knowledge.getCveExamples() : null)
-                .build());
+                .build();
+            if (applySchemaGuards(ssrfVuln, schemaConstraints)) {
+                mergeOrAdd(vulnerabilities, ssrfVuln, paramName);
+            }
         }
         
         // НОВЫЕ ПРОВЕРКИ (14 паттернов из EnhancedRules!)
         
         // 4. NoSQL Injection
-        if (EnhancedRules.isNoSQLRisk(param)) {
-            vulnerabilities.add(Vulnerability.builder()
+        if (EnhancedRules.isNoSQLRisk(param, schemaConstraints)) {
+            Vulnerability nosqlVuln = Vulnerability.builder()
                 .id(com.vtb.scanner.models.VulnerabilityIdGenerator.generateId(
                     VulnerabilityType.NOSQL_INJECTION, path, method, paramName,
                     "NoSQL Injection risk in parameter"))
@@ -375,12 +518,15 @@ public class InjectionScanner implements VulnerabilityScanner {
                         .build(),
                     operation, false, true))
                 .priority(2)
-                .build());
+                .build();
+            if (applySchemaGuards(nosqlVuln, schemaConstraints)) {
+                vulnerabilities.add(nosqlVuln);
+            }
         }
         
         // 5. LDAP Injection
-        if (EnhancedRules.isLDAPRisk(param)) {
-            vulnerabilities.add(Vulnerability.builder()
+        if (EnhancedRules.isLDAPRisk(param, schemaConstraints)) {
+            Vulnerability ldapVuln = Vulnerability.builder()
                 .id(com.vtb.scanner.models.VulnerabilityIdGenerator.generateId(
                     VulnerabilityType.LDAP_INJECTION, path, method, paramName,
                     "LDAP Injection risk in parameter"))
@@ -413,16 +559,19 @@ public class InjectionScanner implements VulnerabilityScanner {
                         .build(),
                     operation, false, true))
                 .priority(2)
-                .build());
+                .build();
+            if (applySchemaGuards(ldapVuln, schemaConstraints)) {
+                vulnerabilities.add(ldapVuln);
+            }
         }
         
         // 6. Template Injection (SSTI) - КРИТИЧНО!
-        if (EnhancedRules.isTemplateInjectionRisk(param)) {
-            vulnerabilities.add(Vulnerability.builder()
+        if (EnhancedRules.isTemplateInjectionRisk(param, schemaConstraints)) {
+            Vulnerability sstiVuln = Vulnerability.builder()
                 .id(com.vtb.scanner.models.VulnerabilityIdGenerator.generateId(
-                    VulnerabilityType.SECURITY_MISCONFIGURATION, path, method, paramName,
+                    VulnerabilityType.COMMAND_INJECTION, path, method, paramName,
                     "Server-Side Template Injection (SSTI) risk"))
-                .type(VulnerabilityType.SECURITY_MISCONFIGURATION)
+                .type(VulnerabilityType.COMMAND_INJECTION)
                 .severity(Severity.CRITICAL)
                 .title("КРИТИЧНО! Template Injection в '" + paramName + "'")
                 .description(String.format(
@@ -450,21 +599,24 @@ public class InjectionScanner implements VulnerabilityScanner {
                 .evidence("Template параметр: " + paramName)
                 .confidence(com.vtb.scanner.heuristics.ConfidenceCalculator.calculateConfidence(
                     Vulnerability.builder()
-                        .type(VulnerabilityType.SECURITY_MISCONFIGURATION)
+                        .type(VulnerabilityType.COMMAND_INJECTION)
                         .severity(Severity.CRITICAL)
                         .build(),
                     operation, false, true)) // hasEvidence=true (нашли template параметр!)
                 .priority(1)
-                .build());
+                .build();
+            if (applySchemaGuards(sstiVuln, schemaConstraints)) {
+                vulnerabilities.add(sstiVuln);
+            }
         }
         
         // 7. XML External Entity (XXE)
-        if (EnhancedRules.isXMLRisk(param)) {
-            vulnerabilities.add(Vulnerability.builder()
+        if (EnhancedRules.isXMLRisk(param, schemaConstraints)) {
+            Vulnerability xxeVuln = Vulnerability.builder()
                 .id(com.vtb.scanner.models.VulnerabilityIdGenerator.generateId(
-                    VulnerabilityType.SECURITY_MISCONFIGURATION, path, method, paramName,
+                    VulnerabilityType.SSRF, path, method, paramName,
                     "XXE (XML External Entity) risk"))
-                .type(VulnerabilityType.SECURITY_MISCONFIGURATION)
+                .type(VulnerabilityType.SSRF)
                 .severity(Severity.HIGH)
                 .title("XXE (XML External Entity) риск в '" + paramName + "'")
                 .description(String.format(
@@ -491,21 +643,24 @@ public class InjectionScanner implements VulnerabilityScanner {
                 .evidence("XML/SOAP параметр: " + paramName)
                 .confidence(com.vtb.scanner.heuristics.ConfidenceCalculator.calculateConfidence(
                     Vulnerability.builder()
-                        .type(VulnerabilityType.SECURITY_MISCONFIGURATION)
+                        .type(VulnerabilityType.SSRF)
                         .severity(Severity.HIGH)
                         .build(),
                     operation, false, true))
                 .priority(2)
-                .build());
+                .build();
+            if (applySchemaGuards(xxeVuln, schemaConstraints)) {
+                vulnerabilities.add(xxeVuln);
+            }
         }
         
         // 8. Insecure Deserialization - КРИТИЧНО!
-        if (EnhancedRules.isDeserializationRisk(param)) {
-            vulnerabilities.add(Vulnerability.builder()
+        if (EnhancedRules.isDeserializationRisk(param, schemaConstraints)) {
+            Vulnerability deserializationVuln = Vulnerability.builder()
                 .id(com.vtb.scanner.models.VulnerabilityIdGenerator.generateId(
-                    VulnerabilityType.SECURITY_MISCONFIGURATION, path, method, paramName,
+                    VulnerabilityType.COMMAND_INJECTION, path, method, paramName,
                     "Deserialization risk"))
-                .type(VulnerabilityType.SECURITY_MISCONFIGURATION)
+                .type(VulnerabilityType.COMMAND_INJECTION)
                 .severity(Severity.CRITICAL)
                 .title("КРИТИЧНО! Insecure Deserialization в '" + paramName + "'")
                 .description(String.format(
@@ -541,41 +696,44 @@ public class InjectionScanner implements VulnerabilityScanner {
                 .evidence("Deserialization параметр: " + paramName)
                 .confidence(com.vtb.scanner.heuristics.ConfidenceCalculator.calculateConfidence(
                     Vulnerability.builder()
-                        .type(VulnerabilityType.SECURITY_MISCONFIGURATION)
+                        .type(VulnerabilityType.COMMAND_INJECTION)
                         .severity(Severity.CRITICAL)
                         .build(),
                     operation, false, true)) // hasEvidence=true
                 .priority(1)
-                .build());
+                .build();
+            if (applySchemaGuards(deserializationVuln, schemaConstraints)) {
+                vulnerabilities.add(deserializationVuln);
+            }
         }
         
         // 9. Sensitive data в URL - используем EnhancedRules!
-        if (EnhancedRules.isSensitiveDataInURL(param)) {
-                vulnerabilities.add(Vulnerability.builder()
+        if (EnhancedRules.isSensitiveDataInURL(param, schemaConstraints)) {
+            Vulnerability sensitiveVuln = Vulnerability.builder()
                 .id(com.vtb.scanner.models.VulnerabilityIdGenerator.generateId(
                     VulnerabilityType.SENSITIVE_DATA_IN_URL, path, method, paramName,
                     "Sensitive data in URL parameter"))
-                    .type(VulnerabilityType.SENSITIVE_DATA_IN_URL)
-                    .severity(Severity.HIGH)
-                    .title("Чувствительные данные в URL: '" + paramName + "'")
-                    .description(
-                        "Параметр '" + paramName + "' передается в query string.\n\n" +
-                        "Проблемы:\n" +
-                        "• Логируется в access logs\n" +
-                        "• Сохраняется в browser history\n" +
-                        "• Передается в Referer header\n" +
-                        "• Видно в сети (даже через HTTPS!)"
-                    )
-                    .endpoint(path)
-                    .method(method)
-                    .recommendation(
-                        "Передавайте чувствительные данные:\n" +
-                        "• В Authorization header\n" +
-                        "• В request body (POST/PUT)\n" +
-                        "• НЕ в URL!"
-                    )
-                    .owaspCategory("Data Exposure")
-                    .evidence("Query parameter: " + paramName)
+                .type(VulnerabilityType.SENSITIVE_DATA_IN_URL)
+                .severity(Severity.HIGH)
+                .title("Чувствительные данные в URL: '" + paramName + "'")
+                .description(
+                    "Параметр '" + paramName + "' передается в query string.\n\n" +
+                    "Проблемы:\n" +
+                    "• Логируется в access logs\n" +
+                    "• Сохраняется в browser history\n" +
+                    "• Передается в Referer header\n" +
+                    "• Видно в сети (даже через HTTPS!)"
+                )
+                .endpoint(path)
+                .method(method)
+                .recommendation(
+                    "Передавайте чувствительные данные:\n" +
+                    "• В Authorization header\n" +
+                    "• В request body (POST/PUT)\n" +
+                    "• НЕ в URL!"
+                )
+                .owaspCategory("Data Exposure")
+                .evidence("Query parameter: " + paramName)
                 .confidence(com.vtb.scanner.heuristics.ConfidenceCalculator.calculateConfidence(
                     Vulnerability.builder()
                         .type(VulnerabilityType.SENSITIVE_DATA_IN_URL)
@@ -583,51 +741,42 @@ public class InjectionScanner implements VulnerabilityScanner {
                         .build(),
                     operation, false, true))
                 .priority(2)
-                    .build());
+                .build();
+            if (applySchemaGuards(sensitiveVuln, schemaConstraints)) {
+                vulnerabilities.add(sensitiveVuln);
+            }
         }
         
         return vulnerabilities;
     }
     
     /**
-     * Проверить наличие валидации для параметра
-     */
-    private boolean hasProperValidation(Parameter param) {
-        Schema schema = param.getSchema();
-        if (schema == null) {
-            return false;
-        }
-        
-        // Проверяем наличие pattern, enum, format и т.д.
-        return schema.getPattern() != null ||
-               schema.getEnum() != null ||
-               (schema.getFormat() != null && !schema.getFormat().isEmpty()) ||
-               (schema.getMaxLength() != null && schema.getMaxLength() < 100);
-    }
-    
-    /**
      * Проверка request body schema на инъекции
      * Рекурсивно проверяет все поля в schema
      */
-    private List<Vulnerability> checkRequestBodySchema(String path, String method, 
-                                                        io.swagger.v3.oas.models.media.Schema schema,
-                                                        Operation operation, int riskScore) {
-        return checkRequestBodySchema(path, method, schema, operation, riskScore, null);
+    private List<Vulnerability> checkRequestBodySchema(String path, String method,
+                                                       Schema schema,
+                                                       Operation operation, int riskScore,
+                                                       SchemaConstraintAnalyzer constraintAnalyzer) {
+        return checkRequestBodySchema(path, method, schema, operation, riskScore, null, constraintAnalyzer);
     }
     
-    private List<Vulnerability> checkRequestBodySchema(String path, String method, 
-                                                        io.swagger.v3.oas.models.media.Schema schema,
-                                                        Operation operation, int riskScore, OpenAPI openAPI) {
-        return checkRequestBodySchema(path, method, schema, operation, riskScore, openAPI, 0, new HashSet<>());
+    private List<Vulnerability> checkRequestBodySchema(String path, String method,
+                                                       Schema schema,
+                                                       Operation operation, int riskScore, OpenAPI openAPI,
+                                                       SchemaConstraintAnalyzer constraintAnalyzer) {
+        return checkRequestBodySchema(path, method, schema, operation, riskScore, openAPI, 0,
+            new HashSet<>(), constraintAnalyzer);
     }
     
     /**
      * Рекурсивная проверка request body schema с защитой от циклических ссылок
      */
-    private List<Vulnerability> checkRequestBodySchema(String path, String method, 
-                                                        io.swagger.v3.oas.models.media.Schema schema,
-                                                        Operation operation, int riskScore, OpenAPI openAPI,
-                                                        int depth, Set<String> visited) {
+    private List<Vulnerability> checkRequestBodySchema(String path, String method,
+                                                       Schema schema,
+                                                       Operation operation, int riskScore, OpenAPI openAPI,
+                                                       int depth, Set<String> visited,
+                                                       SchemaConstraintAnalyzer constraintAnalyzer) {
         List<Vulnerability> vulnerabilities = new ArrayList<>();
         
         // КРИТИЧНО: Защита от превышения максимальной глубины
@@ -662,17 +811,26 @@ public class InjectionScanner implements VulnerabilityScanner {
         
         for (Object keyObj : properties.keySet()) {
             String fieldName = keyObj.toString();
-            io.swagger.v3.oas.models.media.Schema fieldSchema = 
-                (io.swagger.v3.oas.models.media.Schema) properties.get(keyObj);
+            Schema fieldSchema =
+                (Schema) properties.get(keyObj);
             
             // Создаем временный Parameter для использования EnhancedRules
-            io.swagger.v3.oas.models.parameters.Parameter tempParam = 
+            Parameter tempParam =
                 new io.swagger.v3.oas.models.parameters.QueryParameter();
             tempParam.setName(fieldName);
             tempParam.setSchema(fieldSchema);
+
+            SchemaConstraints fieldConstraints = constraintAnalyzer != null
+                ? constraintAnalyzer.analyzeSchema(fieldSchema)
+                : SchemaConstraints.empty();
+
+            if (fieldConstraints != null && !fieldConstraints.isUserControlled()) {
+                log.debug("Поле '{}' в теле запроса помечено как readOnly/не пользовательское — пропускаем.", fieldName);
+                continue;
+            }
             
             // Command Injection в request body
-            if (EnhancedRules.isCommandInjectionRisk(tempParam)) {
+            if (EnhancedRules.isCommandInjectionRisk(tempParam, fieldConstraints)) {
                 CVEMapper.VulnerabilityKnowledge knowledge = 
                     CVEMapper.getKnowledge(VulnerabilityType.COMMAND_INJECTION);
                 
@@ -691,7 +849,7 @@ public class InjectionScanner implements VulnerabilityScanner {
                         .build(),
                     confidence);
                 
-                vulnerabilities.add(Vulnerability.builder()
+                Vulnerability commandBodyVuln = Vulnerability.builder()
                     .id(com.vtb.scanner.models.VulnerabilityIdGenerator.generateId(
                         VulnerabilityType.COMMAND_INJECTION, path, method, fieldName,
                         "Command Injection risk in request body field"))
@@ -725,7 +883,68 @@ public class InjectionScanner implements VulnerabilityScanner {
                     .riskScore(riskScore)
                     .cwe(knowledge != null ? knowledge.getCwe() : null)
                     .cveExamples(knowledge != null ? knowledge.getCveExamples() : null)
-                    .build());
+                    .build();
+                if (applySchemaGuards(commandBodyVuln, fieldConstraints)) {
+                    vulnerabilities.add(commandBodyVuln);
+                }
+            }
+
+            // SSRF в request body
+            if (EnhancedRules.isSSRFRisk(tempParam, fieldConstraints)) {
+                CVEMapper.VulnerabilityKnowledge knowledge =
+                    CVEMapper.getKnowledge(VulnerabilityType.SSRF);
+
+                int confidence = com.vtb.scanner.heuristics.ConfidenceCalculator.calculateConfidence(
+                    Vulnerability.builder()
+                        .type(VulnerabilityType.SSRF)
+                        .severity(Severity.HIGH)
+                        .riskScore(riskScore)
+                        .build(),
+                    operation, false, true);
+
+                int priority = com.vtb.scanner.heuristics.ConfidenceCalculator.calculatePriority(
+                    Vulnerability.builder()
+                        .type(VulnerabilityType.SSRF)
+                        .severity(Severity.HIGH)
+                        .build(),
+                    confidence);
+
+                Vulnerability ssrfBodyVuln = Vulnerability.builder()
+                    .id(com.vtb.scanner.models.VulnerabilityIdGenerator.generateId(
+                        VulnerabilityType.SSRF, path, method, fieldName,
+                        "SSRF risk in request body field"))
+                    .type(VulnerabilityType.SSRF)
+                    .severity(Severity.HIGH)
+                    .title("SSRF риск в поле '" + fieldName + "' request body")
+                    .description(String.format(
+                        "Поле '%s' принимает URL и может быть использовано для SSRF атаки.\n\n" +
+                        "Примеры атак:\n" +
+                        "• http://169.254.169.254/latest/meta-data/ (AWS metadata)\n" +
+                        "• http://localhost/admin (обход внутренней защиты)\n" +
+                        "• file:///etc/passwd (чтение файлов)\n\n" +
+                        "Рекомендуется ограничить доступные домены и запретить приватные диапазоны.",
+                        fieldName
+                    ))
+                    .endpoint(path)
+                    .method(method)
+                    .recommendation(
+                        "Защитите webhook/URL поле:\n\n" +
+                        "1. Используйте whitelist допустимых доменов\n" +
+                        "2. Запретите обращения к приватным IP и localhost\n" +
+                        "3. Примените DNS rebinding защиту и проверки протокола\n" +
+                        "4. Поддерживайте таймауты и ограничение перенаправлений"
+                    )
+                    .owaspCategory("API7:2023 - SSRF")
+                    .evidence("Поле '" + fieldName + "' request body принимает URL без валидации")
+                    .confidence(confidence)
+                    .priority(priority)
+                    .riskScore(riskScore)
+                    .cwe(knowledge != null ? knowledge.getCwe() : null)
+                    .cveExamples(knowledge != null ? knowledge.getCveExamples() : null)
+                    .build();
+                if (applySchemaGuards(ssrfBodyVuln, fieldConstraints)) {
+                    vulnerabilities.add(ssrfBodyVuln);
+                }
             }
             
             // КРИТИЧНО: Разрешаем $ref ссылки перед рекурсией с защитой от циклов
@@ -746,12 +965,13 @@ public class InjectionScanner implements VulnerabilityScanner {
             // Рекурсивно проверяем вложенные объекты
             if (fieldSchema != null && ("object".equals(fieldSchema.getType()) || fieldSchema.getProperties() != null)) {
                 vulnerabilities.addAll(checkRequestBodySchema(
-                    path, method, fieldSchema, operation, riskScore, openAPI, depth + 1, new HashSet<>(visited)));
+                    path, method, fieldSchema, operation, riskScore, openAPI, depth + 1,
+                    new HashSet<>(visited), constraintAnalyzer));
             }
             
             // Рекурсивно проверяем массивы
             if (fieldSchema != null && "array".equals(fieldSchema.getType()) && fieldSchema.getItems() != null) {
-                io.swagger.v3.oas.models.media.Schema itemsSchema = fieldSchema.getItems();
+                Schema itemsSchema = fieldSchema.getItems();
                 // КРИТИЧНО: Разрешаем $ref ссылки в items перед рекурсией с защитой от циклов
                 if (itemsSchema != null && itemsSchema.get$ref() != null && openAPI != null) {
                     String ref = itemsSchema.get$ref();
@@ -767,8 +987,9 @@ public class InjectionScanner implements VulnerabilityScanner {
                     itemsSchema = resolveSchemaRef(itemsSchema.get$ref(), openAPI);
                 }
                 if (itemsSchema != null) {
-                vulnerabilities.addAll(checkRequestBodySchema(
-                        path, method, itemsSchema, operation, riskScore, openAPI, depth + 1, new HashSet<>(visited)));
+                    vulnerabilities.addAll(checkRequestBodySchema(
+                        path, method, itemsSchema, operation, riskScore, openAPI, depth + 1,
+                        new HashSet<>(visited), constraintAnalyzer));
                 }
             }
         }
@@ -779,7 +1000,136 @@ public class InjectionScanner implements VulnerabilityScanner {
     /**
      * Разрешить $ref ссылку на schema
      */
-    private io.swagger.v3.oas.models.media.Schema resolveSchemaRef(String ref, OpenAPI openAPI) {
+    private boolean applySchemaGuards(Vulnerability vulnerability, SchemaConstraints constraints) {
+        if (vulnerability == null || constraints == null) {
+            return true;
+        }
+        if (!constraints.isUserControlled()) {
+            return false;
+        }
+
+        String evidenceNote = constraints.buildEvidenceNote();
+        appendEvidence(vulnerability, evidenceNote);
+
+        SchemaConstraints.GuardStrength strength = constraints.getGuardStrength();
+        if (strength == SchemaConstraints.GuardStrength.NONE) {
+            return true;
+        }
+
+        if (constraints.getGuardDetails() != null && !constraints.getGuardDetails().isEmpty()) {
+            String guardText = "Schema ограничения: " + String.join(", ", constraints.getGuardDetails()) +
+                ". Атака потребует обхода этих проверок.";
+            appendDescription(vulnerability, guardText);
+        }
+
+        switch (strength) {
+            case WEAK -> {
+                vulnerability.setSeverity(reduceSeverity(vulnerability.getSeverity(), 1));
+                lowerConfidence(vulnerability, 10);
+                lowerRiskScore(vulnerability, 10);
+            }
+            case MODERATE -> {
+                vulnerability.setSeverity(reduceSeverity(vulnerability.getSeverity(), 2));
+                lowerConfidence(vulnerability, 20);
+                lowerRiskScore(vulnerability, 25);
+                lowerPriority(vulnerability, 1);
+            }
+            case STRONG, NOT_USER_CONTROLLED -> {
+                vulnerability.setSeverity(reduceSeverity(vulnerability.getSeverity(), 3));
+                lowerConfidence(vulnerability, 35);
+                lowerRiskScore(vulnerability, 40);
+                lowerPriority(vulnerability, 2);
+            }
+            case NONE -> {
+                // already handled
+            }
+        }
+
+        if (vulnerability.getSeverity() == Severity.INFO &&
+            (strength == SchemaConstraints.GuardStrength.MODERATE
+                || strength == SchemaConstraints.GuardStrength.STRONG
+                || strength == SchemaConstraints.GuardStrength.NOT_USER_CONTROLLED)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    private void appendEvidence(Vulnerability vulnerability, String note) {
+        if (vulnerability == null || note == null || note.isBlank()) {
+            return;
+        }
+        String evidence = vulnerability.getEvidence();
+        if (evidence == null || evidence.isBlank()) {
+            vulnerability.setEvidence(note);
+        } else if (!evidence.contains(note)) {
+            vulnerability.setEvidence(evidence + "; " + note);
+        }
+    }
+
+    private void appendDescription(Vulnerability vulnerability, String note) {
+        if (vulnerability == null || note == null || note.isBlank()) {
+            return;
+        }
+        String description = vulnerability.getDescription();
+        if (description == null || description.isBlank()) {
+            vulnerability.setDescription(note);
+        } else if (!description.contains(note)) {
+            vulnerability.setDescription(description + "\n\n" + note);
+        }
+    }
+
+    private Severity reduceSeverity(Severity severity, int steps) {
+        if (severity == null || steps <= 0) {
+            return severity;
+        }
+        Severity result = severity;
+        for (int i = 0; i < steps && result != Severity.INFO; i++) {
+            result = downgradeOnce(result);
+        }
+        return result;
+    }
+
+    private Severity downgradeOnce(Severity severity) {
+        if (severity == null) {
+            return Severity.INFO;
+        }
+        switch (severity) {
+            case CRITICAL:
+                return Severity.HIGH;
+            case HIGH:
+                return Severity.MEDIUM;
+            case MEDIUM:
+                return Severity.LOW;
+            case LOW:
+            case INFO:
+            default:
+                return Severity.INFO;
+        }
+    }
+
+    private void lowerConfidence(Vulnerability vulnerability, int delta) {
+        if (vulnerability == null || delta <= 0) {
+            return;
+        }
+        vulnerability.setConfidence(Math.max(0, vulnerability.getConfidence() - delta));
+    }
+
+    private void lowerRiskScore(Vulnerability vulnerability, int delta) {
+        if (vulnerability == null || delta <= 0) {
+            return;
+        }
+        vulnerability.setRiskScore(Math.max(0, vulnerability.getRiskScore() - delta));
+    }
+
+    private void lowerPriority(Vulnerability vulnerability, int delta) {
+        if (vulnerability == null || delta <= 0) {
+            return;
+        }
+        vulnerability.setPriority(Math.max(1, vulnerability.getPriority() - delta));
+    }
+
+    private Schema resolveSchemaRef(String ref, OpenAPI openAPI) {
         if (ref == null || openAPI == null || openAPI.getComponents() == null) {
             return null;
         }

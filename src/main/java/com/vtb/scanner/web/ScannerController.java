@@ -5,6 +5,7 @@ import com.vtb.scanner.core.OpenAPIParser;
 import com.vtb.scanner.core.SecurityScanner;
 import com.vtb.scanner.integration.GOSTGateway;
 import com.vtb.scanner.models.ScanResult;
+import com.vtb.scanner.semantic.ContextAnalyzer;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -360,15 +361,30 @@ public class ScannerController {
                 com.vtb.scanner.fuzzing.SmartFuzzer fuzzer = 
                     new com.vtb.scanner.fuzzing.SmartFuzzer(targetUrl);
                 // КРИТИЧНО: Передаем найденные уязвимости для целевой проверки!
-                List<com.vtb.scanner.models.Vulnerability> fuzzingVulns = 
-                    fuzzer.targetedProbing(result.getVulnerabilities(), parser.getOpenAPI(), parser);
+                ContextAnalyzer.APIContext apiContext = ContextAnalyzer.APIContext.GENERAL;
+                try {
+                    if (result.getApiContext() != null) {
+                        apiContext = ContextAnalyzer.APIContext.valueOf(result.getApiContext());
+                    }
+                } catch (IllegalArgumentException ignored) {
+                    // Используем GENERAL если распарсить не удалось
+                }
+                
+                List<com.vtb.scanner.models.Vulnerability> fuzzingVulns =
+                    fuzzer.targetedProbing(
+                        result.getVulnerabilities(),
+                        parser.getOpenAPI(),
+                        parser,
+                        apiContext,
+                        result.getAttackSurface(),
+                        result.getThreatGraph());
                 
                 if (!fuzzingVulns.isEmpty()) {
                     // КРИТИЧНО: Дедуплицируем подтвержденные уязвимости перед добавлением
                     // чтобы избежать дубликатов с уже существующими уязвимостями
                     // КРИТИЧНО: Синхронизируем доступ к списку уязвимостей для thread-safety
                     synchronized (result.getVulnerabilities()) {
-                        java.util.Map<String, com.vtb.scanner.models.Vulnerability> existingKeys = new java.util.HashMap<>();
+                        Map<String, com.vtb.scanner.models.Vulnerability> existingKeys = new HashMap<>();
                         for (com.vtb.scanner.models.Vulnerability existing : result.getVulnerabilities()) {
                             if (existing != null && existing.getEndpoint() != null && existing.getMethod() != null && existing.getType() != null) {
                                 String key = String.format("%s|%s|%s", 

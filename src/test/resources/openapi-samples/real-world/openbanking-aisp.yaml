@@ -1,0 +1,206 @@
+# Extract adapted from Open Banking UK Account and Transaction API
+# Source: https://github.com/OpenBankingUK (MIT Licence)
+# Simplified for regression testing. Contains limited endpoints plus intentionally weak consent modelling.
+
+openapi: 3.0.3
+info:
+  title: Open Banking UK - AISP Sandbox
+  version: 3.1.13-test
+  description: |
+    Banking accounts and transactions API.
+    Used to verify consent handling, mTLS requirements and BOLA scenarios.
+servers:
+  - url: https://rs.openbanking.bank/sandbox
+    description: Sandbox resource server (TLS expected)
+
+components:
+  securitySchemes:
+    PSUAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    TPPTransportCert:
+      type: mutualTLS
+  schemas:
+    OBAccount:
+      type: object
+      required:
+        - AccountId
+        - Currency
+      properties:
+        AccountId:
+          type: string
+        Currency:
+          type: string
+        AccountType:
+          type: string
+        Servicer:
+          type: object
+          properties:
+            SchemeName:
+              type: string
+            Identification:
+              type: string
+    OBTransaction:
+      type: object
+      properties:
+        AccountId:
+          type: string
+        CreditDebitIndicator:
+          type: string
+        Amount:
+          type: object
+          properties:
+            Amount:
+              type: string
+            Currency:
+              type: string
+    OBConsent:
+      type: object
+      required:
+        - Data
+      properties:
+        Data:
+          type: object
+          required:
+            - Permissions
+          properties:
+            Permissions:
+              type: array
+              items:
+                type: string
+            ExpirationDateTime:
+              type: string
+              format: date-time
+            TransactionFromDateTime:
+              type: string
+              format: date-time
+
+paths:
+  /open-banking/v3.1/aisp/account-access-consents:
+    post:
+      summary: Create account-access-consent
+      description: |
+        Initiate account access consent for AIS journey. Consent moderation intentionally simplified.
+      operationId: createAccountAccessConsent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OBConsent'
+      responses:
+        '201':
+          description: Created
+          headers:
+            x-fapi-interaction-id:
+              schema:
+                type: string
+      security:
+        - TPPTransportCert: []
+
+  /open-banking/v3.1/aisp/accounts:
+    get:
+      summary: Get Accounts
+      description: |
+        Returns list of customer accounts linked to consent.
+      operationId: getAccounts
+      parameters:
+        - name: x-fapi-interaction-id
+          in: header
+          required: false
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+            example: Bearer PSU-token
+      responses:
+        '200':
+          description: Account list
+          headers:
+            x-fapi-interaction-id:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Data:
+                    type: object
+                    properties:
+                      Account:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/OBAccount'
+      security:
+        - PSUAuth: []
+        - TPPTransportCert: []
+
+  /open-banking/v3.1/aisp/accounts/{AccountId}/transactions:
+    get:
+      summary: Get Transactions for account
+      description: |
+        Returns list of transactions for specified account.
+      operationId: getAccountTransactions
+      parameters:
+        - name: AccountId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: x-fapi-customer-ip-address
+          in: header
+          required: false
+          schema:
+            type: string
+        - name: fromBookingDateTime
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Transactions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  Data:
+                    type: object
+                    properties:
+                      Transaction:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/OBTransaction'
+      security:
+        - PSUAuth: []
+        - TPPTransportCert: []
+
+  /open-banking/v3.1/aisp/accounts/{AccountId}:
+    delete:
+      summary: Revoke account connection
+      description: |
+        Allows PSU to revoke consent for a single account.
+        For test purposes, security is intentionally lax to trigger BFLA/BOLA checks.
+      operationId: deleteAccount
+      parameters:
+        - name: AccountId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Consent revoked
+

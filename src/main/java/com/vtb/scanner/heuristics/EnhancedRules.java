@@ -1,10 +1,18 @@
 package com.vtb.scanner.heuristics;
 
+import com.vtb.scanner.analysis.SchemaConstraintAnalyzer.SchemaConstraints;
 import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.media.Schema;
 import io.swagger.v3.oas.models.parameters.Parameter;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
@@ -275,10 +283,16 @@ public class EnhancedRules {
     // ═══════════════════════════════════════════════════════════════
     
     private static final Pattern OPEN_BANKING_PATTERNS = Pattern.compile(
-        ".*(psd2|PSD2|openbanking|open_banking|" +
-        "aisp|AISP|pisp|PISP|" +
-        "consent|Consent|authorization|Authorization|" +
-        "account.*access|payment.*initiation).*",
+        ".*(" +
+            "psd2|openbanking|open_banking|xs2a|" +
+            "aisp|pisp|piisp|cbpii|" +
+            "sbp|sbpay|sbbol|fastpayment|fps|miraccept|mir_accept|" +
+            "tpp|psu|x-psu-|x-fapi-|x-tpp-|x-consent-id|" +
+            "consent|permissions?|authorization|" +
+            "funds.*confirmation|balance.*confirmation|" +
+            "account.*access|payment.*initiation|" +
+            "esia|esid|smev" +
+        ").*",
         Pattern.CASE_INSENSITIVE
     );
     
@@ -287,11 +301,14 @@ public class EnhancedRules {
     // ═══════════════════════════════════════════════════════════════
     
     private static final Pattern IOT_PATTERNS = Pattern.compile(
-        ".*(device|Device|DEVICE|deviceId|device_id|" +
-        "sensor|Sensor|actuator|Actuator|" +
-        "mqtt|MQTT|coap|CoAP|" +
-        "firmware|Firmware|update|Update|" +
-        "provision|Provision|register|Register).*",
+        ".*(" +
+            "device|deviceId|device_id|psu-device|" +
+            "sensor|actuator|telemetry|shadow|gateway|edge|" +
+            "mqtt|coap|lwm2m|" +
+            "firmware|ota|over-the-air|update|" +
+            "provision|register|" +
+            "устрой|датчик|телеметр|прошивк|шлюз" +
+        ").*",
         Pattern.CASE_INSENSITIVE
     );
     
@@ -345,24 +362,40 @@ public class EnhancedRules {
      * Проверка параметра на SQL Injection риск
      */
     public static boolean isSQLInjectionRisk(Parameter param) {
-        if (param == null || param.getName() == null) return false;
-        
-        // 1. Проверка имени
-        if (SQL_PARAM_PATTERNS.matcher(param.getName()).matches()) {
-            String paramNameLower = param.getName().toLowerCase(Locale.ROOT);
-            if (isLikelySafeSqlParam(paramNameLower)) {
+        return isSQLInjectionRisk(param, null);
+    }
+
+    public static boolean isSQLInjectionRisk(Parameter param, SchemaConstraints constraints) {
+        if (param == null || param.getName() == null) {
+            return false;
+        }
+
+        if (!SQL_PARAM_PATTERNS.matcher(param.getName()).matches()) {
+            return false;
+        }
+
+        String paramNameLower = param.getName().toLowerCase(Locale.ROOT);
+        if (isLikelySafeSqlParam(paramNameLower)) {
+            return false;
+        }
+
+        if (constraints != null) {
+            if (isGuardLikelySafe(constraints)) {
                 return false;
             }
+            return true;
+        }
 
-            // 2. Проверка валидации
-            if (param.getSchema() == null) return true;
-            
-            Schema schema = param.getSchema();
-            String format = schema.getFormat() != null ? schema.getFormat().toLowerCase(Locale.ROOT) : null;
-            String type = schema.getType() != null ? schema.getType().toLowerCase(Locale.ROOT) : null;
+        Schema<?> schema = param.getSchema();
+        if (schema == null) {
+            return true;
+        }
 
-            boolean hasValidation =
-                (schema.getPattern() != null && !schema.getPattern().isEmpty()) ||
+        String format = schema.getFormat() != null ? schema.getFormat().toLowerCase(Locale.ROOT) : null;
+        String type = schema.getType() != null ? schema.getType().toLowerCase(Locale.ROOT) : null;
+
+        boolean hasValidation =
+            (schema.getPattern() != null && !schema.getPattern().isEmpty()) ||
                 (schema.getEnum() != null && !schema.getEnum().isEmpty()) ||
                 (schema.getMaxLength() != null && schema.getMaxLength() < 100) ||
                 (schema.getMinLength() != null && schema.getMinLength() > 0) ||
@@ -374,11 +407,8 @@ public class EnhancedRules {
                 "number".equals(type) ||
                 schema.getMinimum() != null ||
                 schema.getMaximum() != null;
-            
-            return !hasValidation; // Риск если НЕТ валидации
-        }
-        
-        return false;
+
+        return !hasValidation;
     }
 
     private static boolean isLikelySafeSqlParam(String paramNameLower) {
@@ -401,16 +431,34 @@ public class EnhancedRules {
      * Проверка на Command Injection
      */
     public static boolean isCommandInjectionRisk(Parameter param) {
-        if (param == null || param.getName() == null) return false;
-        return CMD_PARAM_PATTERNS.matcher(param.getName()).matches();
+        return isCommandInjectionRisk(param, null);
+    }
+
+    public static boolean isCommandInjectionRisk(Parameter param, SchemaConstraints constraints) {
+        if (param == null || param.getName() == null) {
+            return false;
+        }
+        if (!CMD_PARAM_PATTERNS.matcher(param.getName()).matches()) {
+            return false;
+        }
+        return constraints == null || !isGuardLikelySafe(constraints);
     }
     
     /**
      * Проверка на SSRF
      */
     public static boolean isSSRFRisk(Parameter param) {
-        if (param == null || param.getName() == null) return false;
-        return SSRF_PARAM_PATTERNS.matcher(param.getName()).matches();
+        return isSSRFRisk(param, null);
+    }
+
+    public static boolean isSSRFRisk(Parameter param, SchemaConstraints constraints) {
+        if (param == null || param.getName() == null) {
+            return false;
+        }
+        if (!SSRF_PARAM_PATTERNS.matcher(param.getName()).matches()) {
+            return false;
+        }
+        return constraints == null || !isGuardLikelySafe(constraints);
     }
     
     /**
@@ -424,14 +472,13 @@ public class EnhancedRules {
     /**
      * Проверка на персональные данные (ФЗ-152)
      */
-    public static boolean hasPersonalData(Schema schema) {
+    public static boolean hasPersonalData(Schema<?> schema) {
         if (schema == null || schema.getProperties() == null) return false;
         
-        @SuppressWarnings("rawtypes")
-        Map properties = schema.getProperties();
-        
-        for (Object key : properties.keySet()) {
-            String fieldName = key.toString();
+        for (String fieldName : schema.getProperties().keySet()) {
+            if (fieldName == null) {
+                continue;
+            }
             if (PERSONAL_DATA_FIELDS.contains(fieldName) ||
                 PERSONAL_DATA_FIELDS.stream().anyMatch(pd -> 
                     fieldName.toLowerCase().contains(pd.toLowerCase()))) {
@@ -445,16 +492,15 @@ public class EnhancedRules {
     /**
      * Проверка на чувствительные поля в ответе
      */
-    public static List<String> findSensitiveFieldsInResponse(Schema schema) {
+    public static List<String> findSensitiveFieldsInResponse(Schema<?> schema) {
         List<String> found = new ArrayList<>();
         
         if (schema == null || schema.getProperties() == null) return found;
         
-        @SuppressWarnings("rawtypes")
-        Map properties = schema.getProperties();
-        
-        for (Object key : properties.keySet()) {
-            String fieldName = key.toString();
+        for (String fieldName : schema.getProperties().keySet()) {
+            if (fieldName == null) {
+                continue;
+            }
             if (SENSITIVE_FIELDS.contains(fieldName) ||
                 SENSITIVE_FIELDS.stream().anyMatch(sf -> 
                     fieldName.toLowerCase().contains(sf.toLowerCase()))) {
@@ -470,13 +516,30 @@ public class EnhancedRules {
      * Пароли, токены, секреты не должны передаваться в query string
      */
     public static boolean isSensitiveDataInURL(Parameter param) {
+        return isSensitiveDataInURL(param, null);
+    }
+
+    public static boolean isSensitiveDataInURL(Parameter param, SchemaConstraints constraints) {
         if (param == null || param.getName() == null || !"query".equals(param.getIn())) {
+            return false;
+        }
+        
+        if (constraints != null && isGuardLikelySafe(constraints)) {
             return false;
         }
         
         String lowerName = param.getName().toLowerCase();
         return SENSITIVE_FIELDS.stream()
             .anyMatch(sf -> lowerName.contains(sf.toLowerCase()));
+    }
+
+    public static boolean isGuardLikelySafe(SchemaConstraints constraints) {
+        if (constraints == null) {
+            return false;
+        }
+        SchemaConstraints.GuardStrength strength = constraints.getGuardStrength();
+        return strength == SchemaConstraints.GuardStrength.STRONG ||
+            strength == SchemaConstraints.GuardStrength.NOT_USER_CONTROLLED;
     }
     
     /**
@@ -495,7 +558,7 @@ public class EnhancedRules {
     public static int scoreValidation(Parameter param) {
         if (param == null || param.getSchema() == null) return 0;
         
-        Schema schema = param.getSchema();
+        Schema<?> schema = param.getSchema();
         int score = 0;
         
         if (schema.getPattern() != null) score += 40; // Regex validation
@@ -531,7 +594,7 @@ public class EnhancedRules {
         return PATH_TRAVERSAL_PATTERNS.matcher(param.getName()).matches();
     }
     
-    public static boolean hasDangerousFields(Schema schema) {
+    public static boolean hasDangerousFields(Schema<?> schema) {
         return !findMassAssignmentRiskFields(schema, null, null).isEmpty();
     }
     
@@ -539,53 +602,75 @@ public class EnhancedRules {
      * Расширенный анализ полей, которые могут дать Mass Assignment.
      * Возвращает конкретные поля, требующие ручной проверки (учитывает контекст).
      */
-    public static List<String> findMassAssignmentRiskFields(Schema schema, Operation operation, String path) {
-        List<String> result = new ArrayList<>();
-        if (schema == null || schema.getProperties() == null) {
-            return result;
+    public static List<String> findMassAssignmentRiskFields(Schema<?> schema, Operation operation, String path) {
+        if (schema == null) {
+            return Collections.emptyList();
         }
 
         String lowerPath = path != null ? path.toLowerCase(Locale.ROOT) : "";
-        String text = "";
-        if (operation != null) {
-            StringBuilder builder = new StringBuilder();
-            if (operation.getSummary() != null) {
-                builder.append(operation.getSummary()).append(' ');
-            }
-            if (operation.getDescription() != null) {
-                builder.append(operation.getDescription());
-            }
-            text = builder.toString().toLowerCase(Locale.ROOT);
-        }
-
-        @SuppressWarnings("rawtypes")
-        Map properties = schema.getProperties();
-        for (Object key : properties.keySet()) {
-            if (key == null) {
-                continue;
-            }
-            String fieldName = key.toString();
-            String lowerField = fieldName.toLowerCase(Locale.ROOT);
-            @SuppressWarnings("rawtypes")
-            Schema propertySchema = (Schema) properties.get(key);
-
-            if (!isDangerousFieldName(lowerField)) {
-                continue;
-            }
-            if (propertySchema != null && Boolean.TRUE.equals(propertySchema.getReadOnly())) {
-                continue;
-            }
-            if (isBusinessAllowedContext(lowerField, lowerPath, text)) {
-                continue;
-            }
-            if (isStronglyValidated(propertySchema)) {
-                continue;
-            }
-
-            result.add(fieldName);
-        }
-
+        String text = buildOperationText(operation);
+        List<String> result = new ArrayList<>();
+        collectMassAssignmentFields(schema, lowerPath, text, "", new IdentityHashMap<>(), result);
         return result;
+    }
+
+    private static String buildOperationText(Operation operation) {
+        if (operation == null) {
+            return "";
+        }
+        StringBuilder builder = new StringBuilder();
+        if (operation.getSummary() != null) {
+            builder.append(operation.getSummary()).append(' ');
+        }
+        if (operation.getDescription() != null) {
+            builder.append(operation.getDescription());
+        }
+        return builder.toString().toLowerCase(Locale.ROOT);
+    }
+
+    private static void collectMassAssignmentFields(Schema<?> schema,
+                                                    String lowerPath,
+                                                    String operationText,
+                                                    String prefix,
+                                                    IdentityHashMap<Schema<?>, Boolean> visited,
+                                                    List<String> result) {
+        if (schema == null) {
+            return;
+        }
+        if (visited.put(schema, Boolean.TRUE) != null) {
+            return;
+        }
+
+        try {
+            Map<String, Schema<?>> properties = collectSchemaProperties(schema, new IdentityHashMap<>());
+            for (Map.Entry<String, Schema<?>> entry : properties.entrySet()) {
+                String fieldName = entry.getKey();
+                Schema<?> propertySchema = entry.getValue();
+                String fieldPath = prefix.isEmpty() ? fieldName : prefix + "." + fieldName;
+                String lowerField = fieldName.toLowerCase(Locale.ROOT);
+
+                boolean readOnly = propertySchema != null && Boolean.TRUE.equals(propertySchema.getReadOnly());
+
+                if (isDangerousFieldName(lowerField) && !readOnly &&
+                    !isBusinessAllowedContext(lowerField, lowerPath, operationText, propertySchema, fieldPath)) {
+
+                    if (!isStronglyValidated(propertySchema)) {
+                        result.add(fieldPath);
+                    }
+                }
+
+                if (propertySchema != null) {
+                    if (hasNestedObject(propertySchema)) {
+                        collectMassAssignmentFields(propertySchema, lowerPath, operationText, fieldPath, visited, result);
+                    }
+                    if ("array".equalsIgnoreCase(propertySchema.getType()) && propertySchema.getItems() != null) {
+                        collectMassAssignmentFields(propertySchema.getItems(), lowerPath, operationText, fieldPath + "[]", visited, result);
+                    }
+                }
+            }
+        } finally {
+            visited.remove(schema);
+        }
     }
 
     private static boolean isDangerousFieldName(String lowerField) {
@@ -601,18 +686,39 @@ public class EnhancedRules {
         return false;
     }
 
-    private static boolean isBusinessAllowedContext(String lowerField, String lowerPath, String text) {
+    private static boolean isBusinessAllowedContext(String lowerField,
+                                                    String lowerPath,
+                                                    String text,
+                                                    Schema<?> propertySchema,
+                                                    String fieldPath) {
+        boolean isOpenBanking = isOpenBankingContext(lowerPath, text, fieldPath);
+
         if ("permissions".equals(lowerField) || "privileges".equals(lowerField) || lowerField.contains("scope")) {
-            return lowerPath.contains("consent") || lowerPath.contains("permission") ||
-                   text.contains("consent") || text.contains("open banking") || text.contains("scope");
+            return isOpenBanking || lowerPath.contains("consent") || lowerPath.contains("permission") ||
+                   text.contains("consent") || text.contains("open banking") || text.contains("scope") ||
+                   hasSmallEnum(propertySchema);
+        }
+        if (lowerField.contains("consent") || lowerField.contains("psu") || lowerField.contains("tpp")) {
+            return isOpenBanking;
         }
         if ("amount".equals(lowerField) || "balance".equals(lowerField) || "price".equals(lowerField) || "cost".equals(lowerField)) {
-            return lowerPath.contains("payment") || lowerPath.contains("transfer") ||
-                   lowerPath.contains("agreement") || lowerPath.contains("order") ||
-                   text.contains("payment") || text.contains("transfer") || text.contains("transaction");
+            if (isOpenBanking || lowerPath.contains("payment") || lowerPath.contains("transfer") ||
+                lowerPath.contains("agreement") || lowerPath.contains("order") ||
+                text.contains("payment") || text.contains("transfer") || text.contains("transaction")) {
+                return hasNumericGuards(propertySchema) || hasCurrencyMetadata(propertySchema) || fieldPath.toLowerCase(Locale.ROOT).contains("amount");
+            }
+        }
+        if ("currency".equals(lowerField) || lowerField.endsWith("currency")) {
+            return isOpenBanking || hasSmallEnum(propertySchema) || hasCurrencyMetadata(propertySchema);
         }
         if ("status".equals(lowerField)) {
-            return lowerPath.endsWith("/status") || text.contains("status update");
+            return lowerPath.endsWith("/status") || text.contains("status update") || hasSmallEnum(propertySchema);
+        }
+        if (lowerField.endsWith("enabled") || lowerField.endsWith("active")) {
+            return hasSmallEnum(propertySchema);
+        }
+        if (lowerField.contains("limit") || lowerField.contains("threshold")) {
+            return hasNumericGuards(propertySchema);
         }
         return false;
     }
@@ -625,10 +731,16 @@ public class EnhancedRules {
         if (propertySchema.getEnum() != null && !propertySchema.getEnum().isEmpty()) {
             return true;
         }
+        if (propertySchema.getConst() != null) {
+            return true;
+        }
+        if (propertySchema.getDefault() != null && propertySchema.getType() != null && !"object".equals(propertySchema.getType())) {
+            return true;
+        }
         if (propertySchema.getPattern() != null && !propertySchema.getPattern().isEmpty()) {
             return true;
         }
-        if (propertySchema.getMaximum() != null || propertySchema.getMinimum() != null) {
+        if (hasNumericGuards(propertySchema)) {
             return true;
         }
         if (propertySchema.getItems() != null) {
@@ -639,6 +751,155 @@ public class EnhancedRules {
         }
         return false;
     }
+
+    private static Map<String, Schema<?>> collectSchemaProperties(Schema<?> schema,
+                                                                  IdentityHashMap<Schema<?>, Boolean> visited) {
+        Map<String, Schema<?>> properties = new LinkedHashMap<>();
+        if (schema == null) {
+            return properties;
+        }
+        if (visited.put(schema, Boolean.TRUE) != null) {
+            return properties;
+        }
+        try {
+            if (schema.getProperties() != null) {
+                schema.getProperties().forEach((key, value) -> {
+                    if (key != null && value instanceof Schema) {
+                        properties.put(String.valueOf(key), (Schema<?>) value);
+                    }
+                });
+            }
+            if (schema.getAllOf() != null) {
+                for (Schema<?> fragment : schema.getAllOf()) {
+                    properties.putAll(collectSchemaProperties(fragment, visited));
+                }
+            }
+            if (schema.getAnyOf() != null) {
+                for (Schema<?> variant : schema.getAnyOf()) {
+                    mergeOptionalProperties(properties, variant, visited);
+                }
+            }
+            if (schema.getOneOf() != null) {
+                for (Schema<?> variant : schema.getOneOf()) {
+                    mergeOptionalProperties(properties, variant, visited);
+                }
+            }
+        } finally {
+            visited.remove(schema);
+        }
+        return properties;
+    }
+
+    private static void mergeOptionalProperties(Map<String, Schema<?>> target,
+                                                Schema<?> schema,
+                                                IdentityHashMap<Schema<?>, Boolean> visited) {
+        Map<String, Schema<?>> fragmentProps = collectSchemaProperties(schema, visited);
+        for (Map.Entry<String, Schema<?>> entry : fragmentProps.entrySet()) {
+            target.putIfAbsent(entry.getKey(), entry.getValue());
+        }
+    }
+
+    private static boolean hasNestedObject(Schema<?> schema) {
+        if (schema == null) {
+            return false;
+        }
+        if ("object".equalsIgnoreCase(schema.getType())) {
+            return schema.getProperties() != null && !schema.getProperties().isEmpty();
+        }
+        return (schema.getAllOf() != null && !schema.getAllOf().isEmpty()) ||
+               (schema.getAnyOf() != null && !schema.getAnyOf().isEmpty()) ||
+               (schema.getOneOf() != null && !schema.getOneOf().isEmpty());
+    }
+
+    private static boolean hasSmallEnum(Schema<?> schema) {
+        if (schema == null) {
+            return false;
+        }
+        if (schema.getEnum() != null && !schema.getEnum().isEmpty()) {
+            return schema.getEnum().size() <= 10;
+        }
+        if (schema.getItems() != null && schema.getItems().getEnum() != null && !schema.getItems().getEnum().isEmpty()) {
+            return schema.getItems().getEnum().size() <= 10;
+        }
+        return false;
+    }
+
+    private static boolean hasNumericGuards(Schema<?> schema) {
+        if (schema == null) {
+            return false;
+        }
+        if (schema.getMaximum() != null && schema.getMinimum() != null) {
+            double min = schema.getMinimum().doubleValue();
+            double max = schema.getMaximum().doubleValue();
+            return max - min <= 1_000_000; // разумные границы для финансовых операций
+        }
+        if (schema.getMaximum() != null || schema.getMinimum() != null || schema.getExclusiveMaximum() != null || schema.getExclusiveMinimum() != null) {
+            return true;
+        }
+        if (schema.getMultipleOf() != null) {
+            return true;
+        }
+        if (schema.getPattern() != null && !schema.getPattern().isEmpty()) {
+            return true;
+        }
+        if (schema.getFormat() != null) {
+            String format = schema.getFormat().toLowerCase(Locale.ROOT);
+            if (format.contains("decimal") || format.contains("double") || format.contains("currency") || format.contains("money")) {
+                return true;
+            }
+        }
+        if (schema.getType() != null && schema.getType().equalsIgnoreCase("integer")) {
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean hasCurrencyMetadata(Schema<?> schema) {
+        if (schema == null) {
+            return false;
+        }
+        if (schema.getEnum() != null && !schema.getEnum().isEmpty()) {
+            return schema.getEnum().stream().allMatch(item -> item != null && item.toString().length() == 3);
+        }
+        if (schema.getPattern() != null && schema.getPattern().matches("(?i).*(ISO\s?4217|[A-Z]{3}).*")) {
+            return true;
+        }
+        if (schema.getDescription() != null) {
+            String description = schema.getDescription().toLowerCase(Locale.ROOT);
+            if (description.contains("iso 4217") || description.contains("currency code") || description.contains("трехбуквенный")) {
+                return true;
+            }
+        }
+        if (schema.getMaxLength() != null && schema.getMaxLength() == 3) {
+            return true;
+        }
+        if (schema.getMinLength() != null && schema.getMinLength() == 3) {
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean isOpenBankingContext(String lowerPath, String text, String fieldPath) {
+        if (lowerPath == null) {
+            lowerPath = "";
+        }
+        if (text == null) {
+            text = "";
+        }
+        String lowerFieldPath = fieldPath != null ? fieldPath.toLowerCase(Locale.ROOT) : "";
+        if (lowerPath.contains("open-banking") || lowerPath.contains("openbank") || lowerPath.contains("psd2") ||
+            lowerPath.contains("consent") || lowerPath.contains("payments") || lowerPath.contains("funds-confirmation")) {
+            return true;
+        }
+        if (text.contains("open banking") || text.contains("psd2") || text.contains("consent") ||
+            text.contains("permissions") || text.contains("funds confirmation") || text.contains("payment initiation")) {
+            return true;
+        }
+        if (lowerFieldPath.contains("consent") || lowerFieldPath.contains("permissions") || lowerFieldPath.contains("psu") || lowerFieldPath.contains("tpp")) {
+            return true;
+        }
+        return false;
+    }
     
     public static boolean isGraphQLRisk(Parameter param) {
         if (param == null || param.getName() == null) return false;
@@ -646,13 +907,31 @@ public class EnhancedRules {
     }
     
     public static boolean isXMLRisk(Parameter param) {
-        if (param == null || param.getName() == null) return false;
-        return XML_PATTERNS.matcher(param.getName()).matches();
+        return isXMLRisk(param, null);
+    }
+
+    public static boolean isXMLRisk(Parameter param, SchemaConstraints constraints) {
+        if (param == null || param.getName() == null) {
+            return false;
+        }
+        if (!XML_PATTERNS.matcher(param.getName()).matches()) {
+            return false;
+        }
+        return constraints == null || !isGuardLikelySafe(constraints);
     }
     
     public static boolean isNoSQLRisk(Parameter param) {
-        if (param == null || param.getName() == null) return false;
-        return NOSQL_PATTERNS.matcher(param.getName()).matches();
+        return isNoSQLRisk(param, null);
+    }
+
+    public static boolean isNoSQLRisk(Parameter param, SchemaConstraints constraints) {
+        if (param == null || param.getName() == null) {
+            return false;
+        }
+        if (!NOSQL_PATTERNS.matcher(param.getName()).matches()) {
+            return false;
+        }
+        return constraints == null || !isGuardLikelySafe(constraints);
     }
     
     public static boolean isReDoSRisk(Parameter param) {
@@ -671,12 +950,29 @@ public class EnhancedRules {
     }
     
     public static boolean isTemplateInjectionRisk(Parameter param) {
-        if (param == null || param.getName() == null) return false;
-        return TEMPLATE_PATTERNS.matcher(param.getName()).matches();
+        return isTemplateInjectionRisk(param, null);
+    }
+
+    public static boolean isTemplateInjectionRisk(Parameter param, SchemaConstraints constraints) {
+        if (param == null || param.getName() == null) {
+            return false;
+        }
+        if (!TEMPLATE_PATTERNS.matcher(param.getName()).matches()) {
+            return false;
+        }
+        return constraints == null || !isGuardLikelySafe(constraints);
     }
     
     public static boolean isLDAPRisk(Parameter param) {
+        return isLDAPRisk(param, null);
+    }
+
+    public static boolean isLDAPRisk(Parameter param, SchemaConstraints constraints) {
         if (param == null || param.getName() == null) return false;
+
+        if (constraints != null && isGuardLikelySafe(constraints)) {
+            return false;
+        }
 
         String name = param.getName().toLowerCase(Locale.ROOT);
 
@@ -701,7 +997,15 @@ public class EnhancedRules {
     }
     
     public static boolean isDeserializationRisk(Parameter param) {
+        return isDeserializationRisk(param, null);
+    }
+
+    public static boolean isDeserializationRisk(Parameter param, SchemaConstraints constraints) {
         if (param == null || param.getName() == null) {
+            return false;
+        }
+
+        if (constraints != null && isGuardLikelySafe(constraints)) {
             return false;
         }
 
@@ -724,16 +1028,15 @@ public class EnhancedRules {
         return true;
     }
     
-    public static List<String> findDangerousJWTClaims(Schema schema) {
+    public static List<String> findDangerousJWTClaims(Schema<?> schema) {
         List<String> found = new ArrayList<>();
         
         if (schema == null || schema.getProperties() == null) return found;
         
-        @SuppressWarnings("rawtypes")
-        Map properties = schema.getProperties();
-        
-        for (Object key : properties.keySet()) {
-            String fieldName = key.toString();
+        for (String fieldName : schema.getProperties().keySet()) {
+            if (fieldName == null) {
+                continue;
+            }
             if (JWT_DANGEROUS_CLAIMS.contains(fieldName)) {
                 found.add(fieldName);
             }
