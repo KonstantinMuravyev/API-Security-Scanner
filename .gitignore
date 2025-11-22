@@ -31,11 +31,6 @@ reports/
 *.swo
 *~
 
-# Maven
-.mvn/
-mvnw
-mvnw.cmd
-
 # OS
 .DS_Store
 Thumbs.db
