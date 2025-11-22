@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: vtb-api-scanner
+    env: java
+    plan: free
+    buildCommand: "./mvnw clean package -DskipTests"
+    startCommand: "java -jar target/api-security-scanner-1.0.0.jar"
+    envVars:
+      - key: SPRING_PROFILES_ACTIVE
+        value: prod
