@@ -15,13 +15,6 @@ dependency-reduced-pom.xml
 *.tar.gz
 *.rar
 
-# Reports
-reports/
-*.html
-*.json
-!examples/*.yaml
-!examples/*.json
-
 # IDE
 .idea/
 *.iml
